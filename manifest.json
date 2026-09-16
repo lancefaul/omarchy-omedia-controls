@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "id": "lancefaul.omedia-controls",
+  "name": "OMedia Controls",
+  "version": "1.0.0",
+  "author": "lancefaul",
+  "license": "MIT",
+  "description": "Media controls for any MPRIS player: album art, a seek bar, shuffle and repeat, speed, volume, keyboard shortcuts, hotkey commands, and Winamp's classic spectrum analyser, styled like Omarchy's own panels.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OMedia Controls",
+    "description": "Album art and track title in the bar; seek, playback controls, volume and a Winamp-style spectrum analyser in the popup.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaults": {
+      "visualizerEnabled": true,
+      "maxLabelWidth": 260,
+      "hideWhenIdle": false,
+      "pauseOthers": false
+    },
+    "schema": [
+      {
+        "key": "visualizerEnabled",
+        "type": "boolean",
+        "label": "Show spectrum analyser in the popup header",
+        "defaultValue": true
+      },
+      {
+        "key": "maxLabelWidth",
+        "type": "integer",
+        "label": "Maximum title width",
+        "description": "Widest the track title gets in the bar, in logical pixels, before it is elided.",
+        "min": 80,
+        "max": 600,
+        "step": 10,
+        "defaultValue": 260
+      },
+      {
+        "key": "hideWhenIdle",
+        "type": "boolean",
+        "label": "Hide widget when nothing is playing",
+        "description": "Off by default, so the widget stays a stable click target for the popup.",
+        "defaultValue": false
+      },
+      {
+        "key": "pauseOthers",
+        "type": "boolean",
+        "label": "Pause other players when one starts",
+        "description": "Starting playback in one player pauses the rest, like audio focus on a phone. Off by default, since playing a video over music is sometimes the point.",
+        "defaultValue": false
+      }
+    ]
+  }
+}
