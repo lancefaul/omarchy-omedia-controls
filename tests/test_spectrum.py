@@ -108,16 +108,16 @@ class BarDynamicsTest(unittest.TestCase):
         bars, _ = analyse(self.analyser, tone(amplitude=1.0))
         self.assertTrue(all(0 <= b <= 1 for b in bars))
 
-    def test_bars_fall_linearly_three_quarters_of_a_level_a_frame(self):
+    def test_bars_fall_linearly_one_level_a_frame(self):
         bars, _ = analyse(self.analyser, tone())
         hot = self.loudest_bar(bars)
         heights = []
         for _ in range(21):
             bars, _ = analyse(self.analyser, silence())
             heights.append(levels(bars)[hot])
-        # 15 falling 0.75 a frame, rounded as Winamp rounds: zero on frame 20.
+        # 15 falling one level a frame: zero on frame 15.
         self.assertEqual(heights[0], 14)
-        self.assertEqual(heights[19], 0)
+        self.assertEqual(heights[14], 0)
         self.assertTrue(all(a >= b for a, b in zip(heights, heights[1:])))
         # Never more than one level per frame.
         self.assertTrue(all(a - b <= 1 for a, b in zip(heights, heights[1:])))
@@ -160,6 +160,127 @@ class PeakDynamicsTest(unittest.TestCase):
             for b, p in zip(levels(bars), levels(peaks)):
                 if p >= 0:
                     self.assertGreaterEqual(p, b)
+
+
+class OscilloscopeTest(unittest.TestCase):
+    """Winamp's oscilloscope, "lines" style, as Webamp's WavePaintHandler."""
+
+    def test_silence_is_a_flat_line_just_above_centre(self):
+        # A silent byte is 128: round(128 / 16 * 2) - 9 = row 7 of 16.
+        columns = spectrum.scope_columns(np.zeros(spectrum.SCOPE_SAMPLES))
+        self.assertEqual(len(columns), 75)
+        self.assertTrue(all(c == (7, 7, 7) for c in columns))
+
+    def test_one_sample_per_column_every_seventh(self):
+        self.assertEqual(spectrum.SCOPE_SLICE, 7)
+
+    def test_rows_stay_on_the_grid(self):
+        loud = np.sign(np.sin(np.arange(spectrum.SCOPE_SAMPLES) / 3.0))
+        for top, bottom, row in spectrum.scope_columns(loud):
+            self.assertTrue(0 <= top <= bottom <= 15)
+            self.assertTrue(0 <= row <= 15)
+
+    def test_extremes_reach_the_edges(self):
+        high = spectrum.scope_columns(np.full(spectrum.SCOPE_SAMPLES, 1.0))
+        low = spectrum.scope_columns(np.full(spectrum.SCOPE_SAMPLES, -1.0))
+        self.assertEqual(high[5][2], 15)   # byte 255 -> row 23, clamped
+        self.assertEqual(low[5][2], 0)     # byte 0 -> row -9, clamped
+
+    def test_the_line_joins_each_column_to_the_last(self):
+        wave = np.zeros(spectrum.SCOPE_SAMPLES)
+        wave[spectrum.SCOPE_SLICE * 10] = 0.9   # a spike at column 10
+        columns = spectrum.scope_columns(wave)
+        # Down from row 7 to 15 (byte 243, clamped): the run starts one row
+        # lower, at 8, as Winamp draws a descending line.
+        self.assertEqual(columns[10], (8, 15, 15))
+        # Back up to 7: the run covers 7 to 15 with no offset.
+        self.assertEqual(columns[11], (7, 15, 7))
+        self.assertEqual(columns[12], (7, 7, 7))
+
+    def test_scope_line_shape(self):
+        line = spectrum.format_scope([(7, 9, 9)] * 75)
+        self.assertTrue(line.startswith("o|7:9:9,"))
+        self.assertEqual(len(line[2:].split(",")), 75)
+
+    def test_bytes_follow_web_audio(self):
+        self.assertEqual(list(spectrum.scope_bytes(np.array([-1.0, 0.0, 0.999, 2.0]))), [0, 128, 255, 255])
+
+    def test_oscilloscope_is_opt_in(self):
+        self.assertFalse(spectrum.parse_args([]).oscilloscope)
+        self.assertTrue(spectrum.parse_args(["--oscilloscope"]).oscilloscope)
+
+
+class VuMeterTest(unittest.TestCase):
+    def sine(self, amplitude, n=spectrum.HOP):
+        return amplitude * np.sin(2 * math.pi * 1000 * np.arange(n) / spectrum.RATE)
+
+    def test_silence_reads_empty(self):
+        self.assertEqual(spectrum.vu_level(np.zeros(spectrum.HOP)), 0.0)
+        self.assertEqual(spectrum.vu_level(np.array([])), 0.0)
+
+    def test_a_full_scale_sine_reads_full(self):
+        self.assertAlmostEqual(spectrum.vu_level(self.sine(1.0)), 1.0, places=2)
+
+    def test_fifteen_db_down_reads_half(self):
+        self.assertAlmostEqual(spectrum.vu_level(self.sine(10 ** (-15 / 20))), 0.5, places=2)
+
+    def test_meter_rises_instantly_and_falls_a_db_a_frame(self):
+        meter = spectrum.VuMeter()
+        levels, _ = meter.step([self.sine(1.0), self.sine(1.0)])
+        self.assertGreater(levels[0], 0.99)
+        levels, _ = meter.step([np.zeros(spectrum.HOP), np.zeros(spectrum.HOP)])
+        self.assertAlmostEqual(levels[0], 1.0 - spectrum.VU_FALL_PER_FRAME, delta=0.01)
+
+    def test_channels_are_measured_separately(self):
+        meter = spectrum.VuMeter()
+        levels, _ = meter.step([self.sine(1.0), self.sine(0.01)])
+        self.assertGreater(levels[0], 0.99)
+        self.assertLess(levels[1], 0.1)
+
+    def test_peak_holds_then_falls(self):
+        meter = spectrum.VuMeter()
+        meter.step([self.sine(1.0), self.sine(1.0)])
+        silence = [np.zeros(spectrum.HOP), np.zeros(spectrum.HOP)]
+        held = [meter.step(silence)[1][0] for _ in range(spectrum.VU_PEAK_HOLD_FRAMES)]
+        self.assertTrue(all(p > 0.99 for p in held))
+        falling = [meter.step(silence)[1][0] for _ in range(20)]
+        self.assertLess(falling[-1], 0.99)
+        drops = [a - b for a, b in zip(falling, falling[1:])]
+        self.assertGreater(drops[-1], drops[0])
+
+    def test_peak_never_sits_below_the_level(self):
+        meter = spectrum.VuMeter()
+        for frame in range(80):
+            amp = 1.0 if frame % 20 < 5 else 0.05
+            levels, peaks = meter.step([self.sine(amp), self.sine(amp / 2)])
+            for l, p in zip(levels, peaks):
+                self.assertGreaterEqual(p + 1e-9, l)
+
+    def test_vu_line_shape_and_modes(self):
+        self.assertEqual(spectrum.format_vu([0.5, 0.25], [0.75, 0.5]), "v|0.500,0.250|0.750,0.500")
+        self.assertTrue(spectrum.parse_args(["--vu"]).vu)
+        with self.assertRaises(SystemExit):
+            spectrum.parse_args(["--vu", "--oscilloscope"])
+
+
+class GainTest(unittest.TestCase):
+    def test_gain_lines_parse_and_clamp(self):
+        self.assertEqual(spectrum.parse_gain("gain 3.125\n", 1.0), 3.125)
+        self.assertEqual(spectrum.parse_gain("gain 1e9", 1.0), spectrum.MAX_GAIN)
+        self.assertEqual(spectrum.parse_gain("gain -2", 1.0), 0.0)
+        self.assertEqual(spectrum.parse_gain("gain nan", 2.0), 2.0)
+        self.assertEqual(spectrum.parse_gain("volume 3", 2.0), 2.0)
+        self.assertEqual(spectrum.parse_gain("gain", 2.0), 2.0)
+        self.assertEqual(spectrum.parse_gain("", 2.0), 2.0)
+
+
+class StreamTest(unittest.TestCase):
+    def test_stream_lines_parse(self):
+        self.assertEqual(spectrum.parse_stream("stream 23109\n", None), 23109)
+        self.assertIsNone(spectrum.parse_stream("stream -", 23109))
+        self.assertEqual(spectrum.parse_stream("stream abc", 5), 5)
+        self.assertEqual(spectrum.parse_stream("stream 12345678901", 5), 5)
+        self.assertEqual(spectrum.parse_stream("gain 3", 5), 5)
 
 
 class OutputFormatTest(unittest.TestCase):

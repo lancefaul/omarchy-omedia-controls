@@ -2,9 +2,9 @@
 
 Top bar media plugin for Omarchy.
 
-![OMedia Controls in four Omarchy themes: a local track at 1.25x speed, several players at once, a live TV stream, and a live radio station](preview.png)
+![OMedia Controls in seven Omarchy themes: a local track, a player's playlist, a saved playlist, a library search, synced lyrics, a music video with settings open, and a live broadcast](preview.png)
 
-*Album art is blurred in this preview only. The plugin shows it in full.*
+*Album art and video are blurred in this preview only. The plugin shows them in full.*
 
 A native-styled MPRIS widget for the [Omarchy](https://omarchy.org) shell: album
 art and the track title in the bar, and a popup with the full details, transport
@@ -17,15 +17,40 @@ enabled — this widget replaces that icon, so it cannot depend on it.
 
 ## What it does
 
-- **In the bar:** album art and the track title, capped at a configurable width
-  so a long title can't push the bar's other sections around. The full title and
-  artist stay in the tooltip.
+- **In the bar:** album art and the track title, capped at a width you choose
+  so a long title can't push the bar's other sections around; one too long for
+  it scrolls. The full title and artist stay in the tooltip.
 - **In the popup**, laid out like Omarchy's own panels:
-  - a **Now Playing** header with Winamp's classic spectrum analyser beside it
-  - album art, title, artist, and album with its year and track number, each
-    scrolling if too long to fit; a **seek bar** you can drag or click, and a
-    counter that flips between length and time remaining
-  - **playback controls**: shuffle, previous, play/pause, next and repeat
+  - a **Now Playing** header with Winamp's classic spectrum analyser beside it;
+    click it to cycle through Winamp5's striped analyser, mirrored bars, a VU
+    meter, Winamp's oscilloscope and off
+  - album art, or for a browser or video player a live view of its window in
+    the art's place, across the popup; then title, artist, and album with its
+    year and track number, each
+    scrolling if too long to fit, and Winamp's bitrate, kHz and stereo as
+    small chips beneath; a **seek bar** you can drag or click, a counter that
+    flips between length and time remaining, and buttons between the times
+    that skip back and forward
+  - **playback controls**: lyrics, previous, play/pause (the wide one), next
+    and eject.
+    Shuffle and repeat sit in the PLAYLIST bar, shown for players that share
+    a playlist or have shuffle or repeat (archamp, mpv, Spotify), and never
+    for a browser. Its playlist button opens the player's **playlist** in a
+    column beside the player — see Playlists below. Eject opens the
+    **library**, as in Winamp, in a column beside the
+    player: your music folder, folders first, to browse and play, with a
+    search box that finds tracks anywhere in it by any words of their artist,
+    album or file name. Click to
+    select tracks, shift-click for a run, double-click to play one; play a
+    whole folder, everything in the one you are in, or your selection, which
+    can span folders (the column says how many picks are in other folders).
+    The library closes once something is playing.
+    The **lyrics** button at the other end of the row opens the playing track's lyrics in the
+    same column: a `.lrc` beside a local file, else from LRCLIB. Synced
+    lyrics follow the song with the current line lit; click a line to jump
+    to it. The button is dimmed when the track has no lyrics. A track or folder plays in the active
+    player when it takes files (mpv does), and otherwise in the app your
+    desktop opens audio files with
   - **speed**: 1×, 1.25×, 1.5×, 2× and 3×, on players that allow it
   - **volume**, with a labelled mute button. Chromium browsers (Brave,
     Chrome) and any player caught ignoring volume changes get a note instead
@@ -34,20 +59,48 @@ enabled — this widget replaces that icon, so it cannot depend on it.
   something, controls disable rather than disappear.
 - **Several players at once:** anything with a track shows up in a list; click
   one to make it the active player. A playing source wins over a paused one.
+  Players that can be closed, such as mpv, have a close button on their row.
 - **Mouse:** left-click opens the popup, right-click play/pause, middle-click
   next, scroll to change track. Clicking the popup's album art raises the
-  player's own window, when the player supports it. Hover a long title in the
-  bar to scroll it.
+  player's own window, when the player supports it.
+- **Playlists**, saved as M3U files — see below.
+- **Updates:** when a newer release is out, an *Update available* button
+  above Now Playing opens its release notes and the exact command Update
+  runs (Omarchy's own `omarchy plugin update`), with Update, Dismiss, and a
+  copy button for running it in a terminal instead. Updating reloads the
+  plugin; the notice then reads *Updated to …*, with Restart shell and Done.
 - **Keyboard**, while the popup is open — see below.
 - **Commands** for binding hotkeys without opening the popup — see below.
+
+## Playlists
+
+The playlist button in the PLAYLIST bar opens the player's playlist beside
+it, for players that share one over MPRIS (archamp does; mpv, Spotify and
+browsers don't): numbered, with each song's length, the playing one lit, a
+click to play another, and the list's name when it has one.
+
+- **Open** lists your saved playlists: click one to see its tracks, play it,
+  move tracks up and down, remove them, rename it, or delete it (to the
+  trash). Every change is saved to the file straight away.
+- **New** starts an empty saved playlist.
+- **Add** browses or searches your music folder and adds the tracks you pick
+  to what the player is playing, for players that allow it.
+- **Save** keeps what the player is playing as a playlist. Played from a
+  saved playlist, the list keeps its name even after you change it, marked
+  *edited*: Save then writes the changes back, and **Save as** makes a new one.
+- On players that allow it, each song in the playing list can be moved up or
+  down and removed.
+
+Playlists are ordinary M3U files, kept in `Playlists` inside your music folder
+unless you choose another in Settings, so any player can open them.
 
 ## Keyboard
 
 | Key | Does |
 | --- | --- |
 | Space or `k` | Play / pause |
-| ← / → | Seek back / forward 5 seconds |
-| ↑ / ↓ | Volume up / down 5% |
+| ← / → | Seek back / forward (5 seconds unless changed in Settings) |
+| ↑ / ↓ | Volume up / down (5% unless changed in Settings) |
 | `n` / `p` | Next / previous |
 | `m` | Mute |
 | `s` | Shuffle |
@@ -84,41 +137,122 @@ Settings are a fresh Winamp install's: nineteen thick bars, bars that rise
 instantly and fall linearly, and peaks that hang before falling with
 acceleration, all on sixteen stepped levels.
 
+Like Winamp's, they don't follow the volume: the audio is captured after the
+player's own volume control, so the widget scales it back up by that volume
+(mpv's is cubic, most players' linear) before it is analysed. All of them are
+drawn over Winamp's faint dot matrix, in the colours chosen in Settings: a
+gradient of your theme's accent from dark to light (the default), the accent
+alone, or Winamp's own red-to-green spectrum. Click the visualiser for the
+next one; the popup remembers which you chose:
+
+1. **Analyser**, as above.
+2. **Winamp5**, the analyser as the Winamp5 Classified skin draws it: the
+   same bars, striped a row lit and a row empty, every stripe the same
+   height. With Winamp's colours it is plain white, as that skin's is.
+3. **Mirrored bars**, like a voice recorder's: the same nineteen bands, as
+   thick and square as the analyser's bars, growing up and down from the
+   centre line.
+   The lowest band sits in the middle and higher ones fan out to both sides,
+   so the shape stands tallest in the middle.
+4. **VU meter**, stereo: left channel above, right below, each nineteen square
+   segments lit by loudness on a -30 dB to 0 dB scale. It rises instantly,
+   falls a decibel a frame, and holds each channel's peak for half a second
+   before letting it drop.
+5. **Oscilloscope**, Winamp's other visualisation, in its default "lines"
+   style: the raw waveform across 75 columns on the same sixteen rows,
+   brightest near the middle, as Webamp draws it.
+6. **Off**, an empty corner, and no audio captured. Click it for the analyser.
+
 ## Cost while idle
 
 The visualiser's audio capture and the position probe only run while the popup
 is open **and** something is playing. Nothing polls in the background, and the
 `parec` monitor stream is not held open the rest of the time. While running,
-the analyser takes about 1% of a CPU core at 60 frames a second. Titles scroll
-only while the popup is open or under the pointer, so an idle bar never
-animates.
+the analyser takes about 1% of a CPU core at 60 frames a second. The popup's
+long lines scroll only while it is open; the bar's title scrolls when it is
+too long for its width and a track is loaded, which Settings can turn off.
 
 ## Privacy and security
 
 Plugins run unsandboxed inside the Omarchy shell, so here is exactly what this
 one does:
 
-- **Reads all system audio while the popup is open on a playing track**, from
-  the default output's monitor, to draw the visualiser. It is analysed in
-  memory; nothing is stored, and the only thing that leaves `spectrum.py` is
-  nineteen bar levels and nineteen peak levels per frame.
-- **Makes no network requests of its own.** Cover art is loaded from wherever
-  the player says it is, but only as a local `file://`, an `https://` URL, or
-  a base64 raster image embedded in the metadata (how mpv sends a file's own
-  cover) — any other scheme, plain `http`, SVG, credentials in the URL or
-  control characters, and the placeholder is shown instead. The player chooses that URL, so an `https` art
-  URL does mean a request to the host the player picked.
-- **Runs four programs**, always as argument lists and never through a shell:
-  `python3 spectrum.py`, `parec` and `pactl` (inside `spectrum.py`),
-  `busctl --user get-property` to read a player's position and volume
-  straight from the player, and
-  `install -d -m 700` once at load to create its state folder. The player's
-  bus name is refused unless it is shaped like an MPRIS name.
+- **Reads the playing app's audio while the popup is open on a playing
+  track**, from that app's own PipeWire stream (the default output's monitor
+  only when its stream can't be found), to draw the visualiser. It is analysed
+  in memory; nothing is stored, and the only thing that leaves `spectrum.py`
+  is the levels for one frame of the visualisation.
+- **Shows the player's window while the popup is open**, for browsers and
+  video players only: a live capture of that one window, found through
+  Hyprland's window list, shown in the popup and never saved. To notice when
+  the app stops drawing it, a 64 by 36 pixel snapshot is taken every two
+  seconds and written to `$XDG_RUNTIME_DIR` (memory, cleared at logout) as
+  `omedia-feed-0.png` and `omedia-feed-1.png`, overwriting each other.
+- **Asks GitHub whether there is a newer release**, once a day while the
+  popup is open, or when you press Check now in Settings: one request to
+  `api.github.com` for this plugin's latest release, sending nothing but the
+  request itself. Turn it off in Settings. A newer release shows its notes
+  and the exact update command before anything runs; nothing updates unless
+  you press Update.
+- **Makes one other kind of network request of its own: lyrics.** Only while the
+  popup is open on a track (so the lyrics button can be dimmed when there are
+  none), only when the track has no `.lrc` file beside it, and only while
+  online lyrics are on in Settings, the plugin asks [LRCLIB](https://lrclib.net) for the track's lyrics,
+  sending its artist, title, album and length and nothing else. Each answer,
+  found or not, is cached so a song is only asked about once (a miss is
+  retried after a week). Cover art is loaded from wherever the player says it
+  is, but only as a local `file://`, an `https://` URL, or a base64 raster
+  image embedded in the metadata (how mpv sends a file's own cover) — any
+  other scheme, plain `http`, SVG, credentials in the URL or control
+  characters, and the placeholder is shown instead. The player chooses that
+  URL, so an `https` art URL does mean a request to the host the player
+  picked.
+- **Runs these programs**, always as argument lists and never through a shell
+  (and `gio mime audio/mpeg` once at load, for the music player setting, and
+  `zenity` when you choose a music or playlist folder):
+  - `python3 spectrum.py`, with `parec` and `pactl` inside it, for the
+    visualisations
+  - `busctl --user` to read a player's position, volume and playlist straight
+    from the player; to hand it a track, folder or playlist to play (MPRIS
+    `OpenUri`) or a song to jump to; to add and remove songs in its playlist
+    (MPRIS `AddTrack`, `RemoveTrack`) and move them (archamp's own
+    `MoveTrack`), where the player allows it; and to ask D-Bus which process
+    owns a player so its window can be found
+  - `ffprobe` to read a local file's bitrate, sample rate and channels
+  - `xdg-user-dir MUSIC` and `xdg-mime query default audio/mpeg` once at load,
+    to find the music folder and the app that plays audio files
+  - `gtk-launch` (or `xdg-open`) to start that app on a picked track when the
+    active player cannot take it
+  - `install -d -m 700` once at load, to create its state folder
+  - `find` on the music folder when you start a search, to list its files
+  - `omarchy plugin update lancefaul.omedia-controls --yes` when you press
+    Update, `omarchy restart shell` when you press Restart shell, and
+    `wl-copy` when you copy the update command
+  - `mkdir -p`, `mv -n` and `gio trash` for saved playlists: to create the
+    playlist folder the first time one is saved, to rename one, and to move a
+    deleted one to the trash
+
+  A player's bus name is refused unless it is shaped like an MPRIS name.
+  `ffprobe` only gets an absolute path decoded from a `file://` track URL, and
+  the library only plays or adds paths inside the music folder, with no `..`
+  segments and no control characters. Playlist names can't contain slashes or
+  start with a dot, and renames and deletes only touch files in the playlist
+  folder.
 - **Treats track metadata as untrusted.** Titles, artists and albums come from
   whichever application registered a player, and are always rendered as plain
   text, including in the bar tooltip.
-- **Writes one file**: `~/.local/state/omedia-controls/live-streams.json`, in
-  a folder only you can open. It lists the live streams it has detected — the
+- **Writes saved playlists** as M3U files in the playlist folder (`Playlists`
+  inside your music folder unless you choose another), and only when you
+  save, edit, rename or delete one.
+- **Writes five files of its own**, in `~/.local/state/omedia-controls/`, a
+  folder only you can open. `update.json` keeps the last update check: when it
+  ran, the latest release's version and notes, and any update being installed
+  (an update reloads the plugin, so it is written down first and read back
+  afterwards to say how it went). `preferences.json` holds the choices you make in
+  the popup: everything in Settings, the visualisation, and the library folder
+  you last browsed. `lyrics-cache.json` holds up to sixty LRCLIB answers, and
+  `selection.m3u` the last selection played from the library.
+  `live-streams.json` lists the live streams it has detected — the
   app's name and the station's title, such as
   `Brave Origin | Apple Music Country`, and when each was last seen — so a
   station you have heard before shows as LIVE the moment it starts instead of
@@ -135,19 +269,19 @@ one does:
 
 ## Live streams
 
-Live streams show a full bar in the accent colour and `LIVE` instead of a
-duration. On a stream you can rewind, such as YouTube TV, `LIVE` sits on the
-right with a counter of how long you have been watching on the left. On one
-you cannot, such as Apple Music radio, there is nothing to count against, so
-`LIVE` sits alone, centred under the bar. Two kinds are recognised:
+Live streams show a full bar in the accent colour with a pulsing dot and
+`LIVE` centred beneath it, instead of a position and a duration. There is no
+elapsed counter, because a live stream's reported position means nothing:
+Apple Music radio's is an offset into its buffer, and YouTube TV's restarts at
+zero every thirty seconds while the video plays on. Two kinds are recognised:
 
 - **"Never ends" lengths**, such as YouTube TV in Chromium browsers, which
   report the largest possible length. Recognised immediately.
 - **Growing lengths**, such as Apple Music radio, which reports a finite length
-  that grows as audio loads. There is no other signal, so a station you have
-  never heard shows a normal timeline until its length first grows — about 16
-  seconds on Apple Music — and is remembered from then on. Switching from one
-  station to another stays `LIVE` throughout.
+  that grows as audio loads. A station starts playing about 48 seconds behind
+  the end of what it has loaded, where a song starts at zero, so a station
+  reads as `LIVE` the moment it starts, even the first time. Its length then
+  has to grow to confirm it, and it is remembered from then on.
 
 Hover `LIVE` on a stream that can rewind, such as YouTube TV, and it becomes
 **GO LIVE**, which returns you to the live edge. Apple Music radio has no Go
@@ -161,15 +295,19 @@ python3 -m unittest discover -s tests -v
 QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/tst_logic.qml
 ```
 
-The first pins the analyser's Winamp behaviour; the second covers the pure
-logic in `Logic.js`, mostly the checks on input from other applications. Both
-run in CI.
+The first pins the visualisations' behaviour — Winamp's analyser and
+oscilloscope, and the VU meter's ballistics; the second covers the pure
+logic in `Logic.js`, mostly the checks on input from other applications.
 
 ## Requirements
 
 - Omarchy Quattro with its Quickshell-based shell
 - `python`, `python-numpy`, and `parec` (from `libpulse`, already present on
   Omarchy) for the spectrum visualiser
+- Optionally `ffprobe` (from `ffmpeg`) for a local file's bitrate chip;
+  without it, the chips show only the sample rate and channels PipeWire knows
+- Optionally `zenity` for choosing a music or playlist folder in Settings;
+  without it, the Change… buttons do nothing and the defaults stay
 - Any media player that exposes the standard MPRIS interface
 
 ## Install
@@ -221,12 +359,37 @@ that is not there.
 
 ## Settings
 
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `visualizerEnabled` | `true` | Show the spectrum analyser in the popup header |
-| `maxLabelWidth` | `260` | Widest the bar title gets, in logical pixels, before it elides |
-| `hideWhenIdle` | `false` | Off by default, so the widget stays a stable click target |
-| `pauseOthers` | `false` | Starting one player pauses the rest, like audio focus on a phone |
+There are none to edit in a config file: every choice is made in the popup
+and remembered. Coming from 1.0, which kept four settings in the shell's
+config, any you had changed carry over the first time 2.0 runs: hide when
+idle, pause others, the title width (to the nearest width offered, with the
+widest going to full length) and a
+switched-off analyser (as the Off visualisation). The **Settings** button under the volume opens them beside the
+player:
+
+- **Visualiser**: analyser, Winamp5's striped analyser, mirrored bars, VU
+  meter, oscilloscope or off, each shown as a snapshot of itself, and their colours
+  above them: a gradient of your theme's accent (the default), the accent
+  alone, or Winamp's own. Clicking the visualiser itself cycles through them
+  too.
+- **Updates**: the installed and latest versions, Check now, View update, and
+  whether to check daily (on).
+- **Library**: the music folder (the desktop's, or one you choose), and the
+  app that plays picks the active player can't take (the desktop's, or one of
+  the apps it recommends for audio).
+- **Playlist folder**: where saved playlists are kept (Playlists inside the
+  music folder, or one you choose).
+- **Privacy**: look up lyrics online (on), load cover art from the web (on),
+  remember live stations (on), and buttons to forget remembered stations and
+  clear cached lyrics. With the first two off, the plugin makes no network
+  requests at all.
+- **Behaviour**: hide the widget when nothing is playing (off; it returns as
+  soon as a player has a track), pause other players when one starts (off;
+  also switchable from the PLAYERS header), and how wide the title in the bar
+  may grow (160 or 260 px, or its full length; 260 by default), and whether a
+  title longer than that scrolls (on).
+- **Keyboard**: how far ← → and the skip buttons seek (5, 10, 15 or 30 s) and ↑ ↓ change volume (2, 5
+  or 10 %).
 
 ## Remove
 

@@ -14,6 +14,10 @@ Item {
   // Glide speed in pixels per second, and the hold at each end.
   property real speed: 40
   property int holdMs: 1800
+  // A new title starts again from the beginning. Text that only ticks, such as
+  // a running time, keeps scrolling instead, or it would never get past the
+  // start.
+  property bool restartOnTextChange: true
 
   // The width the text wants, for callers that size to it.
   readonly property real contentWidth: label.implicitWidth
@@ -53,6 +57,7 @@ Item {
   onScrollingChanged: if (!scrolling) label.x = 0
   // A new title starts from the beginning rather than mid-glide.
   onTextChanged: {
+    if (!restartOnTextChange) return
     label.x = 0
     if (scrolling) ticker.restart()
   }

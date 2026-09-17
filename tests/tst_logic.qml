@@ -154,6 +154,220 @@ TestCase {
     compare(Logic.parseBusctlPosition(undefined), -1)
   }
 
+  // -------------------------------------------------------------- scope
+
+  function test_scope_frames_parse() {
+    var cols = Logic.parseScopeFrame("o|7:9:9,8:8:8")
+    compare(cols.length, 2)
+    compare(cols[0], { top: 7, bottom: 9, row: 9 })
+  }
+
+  function test_scope_frames_are_bounded_and_clamped() {
+    var many = []
+    for (var i = 0; i < 200; i++) many.push("7:7:7")
+    compare(Logic.parseScopeFrame("o|" + many.join(",")).length, 75)
+    compare(Logic.parseScopeFrame("o|-4:99:40")[0], { top: 0, bottom: 15, row: 15 })
+    compare(Logic.parseScopeFrame("o|9:3:5")[0], { top: 9, bottom: 9, row: 5 })
+    compare(Logic.parseScopeFrame("o|x:1:2,1:2")[0], null)
+    compare(Logic.parseScopeFrame("o|x:1:2,1:2")[1], null)
+    compare(Logic.parseScopeFrame("0.5,0.2|0.6"), [])
+    compare(Logic.parseScopeFrame(undefined), [])
+  }
+
+  function test_scope_is_brightest_in_the_middle() {
+    verify(Logic.scopeBrightness(7) > Logic.scopeBrightness(12))
+    verify(Logic.scopeBrightness(7) > Logic.scopeBrightness(1))
+    compare(Logic.scopeBrightness(6), 1)
+  }
+
+  function test_visualisations_cycle_through_four() {
+    compare(Logic.nextVisualisation("analyser"), "winamp5")
+    compare(Logic.nextVisualisation("winamp5"), "mirror")
+    compare(Logic.nextVisualisation("mirror"), "vu")
+    compare(Logic.nextVisualisation("vu"), "oscilloscope")
+    compare(Logic.nextVisualisation("oscilloscope"), "off")
+    compare(Logic.nextVisualisation("off"), "analyser")
+    compare(Logic.nextVisualisation("junk"), "winamp5")
+  }
+
+  function test_old_settings_carry_over() {
+    var d = Logic.parsePreferences("")
+    compare(d.titleWidth, 260)
+    compare(d.scrollTitle, true)
+    compare(Logic.parsePreferences('{"version":1,"scrollTitle":false}').scrollTitle, false)
+    compare(d.settingsMigrated, false)
+    var m = Logic.migrateSettings(d, { hideWhenIdle: true, pauseOthers: true, maxLabelWidth: 200, visualizerEnabled: false })
+    compare(m.hideWhenIdle, true)
+    compare(m.pauseOthers, true)
+    compare(m.titleWidth, 160)
+    compare(m.visualisation, "off")
+    compare(Logic.migrateSettings(d, { visualizerEnabled: true }).visualisation, "analyser")
+    compare(m.settingsMigrated, true)
+    var none = Logic.migrateSettings(Object.assign({}, d, { pauseOthers: true }), {})
+    compare(none.pauseOthers, true)
+    compare(none.titleWidth, 260)
+    compare(Logic.migrateSettings(d, { maxLabelWidth: 80 }).titleWidth, 160)
+    compare(Logic.migrateSettings(d, { maxLabelWidth: 600 }).titleWidth, 0)
+    compare(Logic.migrateSettings(d, { maxLabelWidth: 430 }).titleWidth, 0)
+    compare(Logic.migrateSettings(d, { maxLabelWidth: 420 }).titleWidth, 260)
+    compare(Logic.migrateSettings(d, { maxLabelWidth: "junk" }).titleWidth, 260)
+    compare(Logic.migrateSettings(d, null).settingsMigrated, true)
+    compare(Logic.parsePreferences('{"version":1,"titleWidth":0,"settingsMigrated":true}').titleWidth, 0)
+    compare(Logic.parsePreferences('{"version":1,"titleWidth":300}').titleWidth, 260)
+    compare(Logic.parsePreferences('{"version":1,"titleWidth":480}').titleWidth, 260)
+    compare(JSON.parse(Logic.serializePreferences({ titleWidth: 160, settingsMigrated: true })).titleWidth, 160)
+  }
+
+  function test_visualiser_colours() {
+    compare(Logic.visColour("winamp"), "winamp")
+    compare(Logic.visColour("white"), "gradient")
+    compare(Logic.visColour(undefined), "gradient")
+    compare(Logic.VIS_COLOURS, ["gradient", "solid", "winamp"])
+    compare(Logic.mixHex("#000000", "#FFFFFF", 0.5), "#808080")
+    var grad = Logic.spectrumColors("gradient", "#00FF00")
+    compare(grad[0], "#B3FFB3")
+    compare(grad[15], "#006600")
+    compare(Logic.spectrumColors("solid", "#123456")[7], "#123456")
+    compare(Logic.spectrumColors("winamp", "#123456")[0], "#EF3110")
+    compare(Logic.spectrumColorAt(grad, 0), "#006600")
+    compare(Logic.spectrumColorAt(grad, 1), "#B3FFB3")
+    compare(Logic.vuSegmentColor(grad, 0), "#006600")
+    compare(Logic.vuSegmentColor(grad, 18), "#B3FFB3")
+    compare(Logic.scopeColor("winamp", grad, 7), "#FFFFFF")
+    compare(Logic.scopeColor("gradient", grad, 3), grad[3])
+    compare(Logic.scopeColor("solid", grad, 3), null)
+    verify(Logic.winamp5RowLit(0))
+    verify(!Logic.winamp5RowLit(1))
+    compare(Logic.parsePreferences('{"version":1}').visColour, "gradient")
+    compare(Logic.parsePreferences('{"version":1,"visColour":"solid"}').visColour, "solid")
+    compare(JSON.parse(Logic.serializePreferences({ visColour: "winamp" })).visColour, "winamp")
+  }
+
+  function test_mirrored_bars_put_the_lowest_band_in_the_middle() {
+    compare(Logic.MIRROR_BARS, 19)
+    compare(Logic.mirrorBand(9), 0)
+    compare(Logic.mirrorBand(8), 1)
+    compare(Logic.mirrorBand(10), 2)
+    compare(Logic.mirrorBand(0), 17)
+    compare(Logic.mirrorBand(18), 18)
+    // Every band appears exactly once.
+    var seen = []
+    for (var i = 0; i < 19; i++) seen.push(Logic.mirrorBand(i))
+    seen.sort(function(a, b) { return a - b })
+    compare(seen, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
+  }
+
+  function test_pause_others_is_off_unless_saved_on() {
+    var both = Logic.parsePreferences(Logic.serializePreferences({ visualisation: "mirror", pauseOthers: true }))
+    compare(both.visualisation, "mirror")
+    compare(both.pauseOthers, true)
+    compare(Logic.parsePreferences('{"version":1,"pauseOthers":"yes"}').pauseOthers, false)
+    compare(Logic.parsePreferences('{"version":1}').pauseOthers, false)
+    compare(Logic.parsePreferences("junk").pauseOthers, false)
+  }
+
+  function test_vu_frames_parse_and_clamp() {
+    compare(Logic.parseVuFrame("v|0.720,0.655|0.810,0.790"), { levels: [0.72, 0.655], peaks: [0.81, 0.79] })
+    compare(Logic.parseVuFrame("v|2,-1|x,0.5"), { levels: [1, 0], peaks: [0, 0.5] })
+    compare(Logic.parseVuFrame("v|0.5"), { levels: [0.5, 0], peaks: [0, 0] })
+    compare(Logic.parseVuFrame("0.5,0.2|0.6"), { levels: [0, 0], peaks: [0, 0] })
+    compare(Logic.parseVuFrame(undefined), { levels: [0, 0], peaks: [0, 0] })
+  }
+
+  function test_visualiser_gain_undoes_player_volume() {
+    compare(Logic.visualiserGain(0.32, false), 1 / 0.32)
+    compare(Logic.visualiserGain(0.5, true), 8)
+    compare(Logic.visualiserGain(1, false), 1)
+    compare(Logic.visualiserGain(0, false), 1)
+    compare(Logic.visualiserGain(0.001, false), Logic.MAX_VISUALISER_GAIN)
+    compare(Logic.visualiserGain(undefined, true), 1)
+    verify(Logic.volumeIsCubic("org.mpris.MediaPlayer2.mpv"))
+    verify(Logic.volumeIsCubic("org.mpris.MediaPlayer2.mpv.instance-ab12"))
+    verify(!Logic.volumeIsCubic("org.mpris.MediaPlayer2.archamp"))
+    verify(!Logic.volumeIsCubic("org.mpris.MediaPlayer2.mpvx"))
+  }
+
+  function test_preview_frames_are_on_the_grid() {
+    compare(Logic.PREVIEW_BARS.length, 19)
+    compare(Logic.PREVIEW_PEAKS.length, 19)
+    for (var i = 0; i < 19; i++) verify(Logic.PREVIEW_PEAKS[i] >= Logic.PREVIEW_BARS[i])
+    var scope = Logic.previewScope()
+    compare(scope.length, 75)
+    for (var j = 0; j < scope.length; j++) verify(scope[j].top >= 0 && scope[j].top <= scope[j].bottom && scope[j].bottom <= 15)
+  }
+
+  function test_vu_segments() {
+    compare(Logic.vuLit(0), 0)
+    compare(Logic.vuLit(1), 19)
+    compare(Logic.vuLit(0.5), 10)
+    compare(Logic.vuPeakSegment(0.8, 0.5), 14)
+    compare(Logic.vuPeakSegment(0.2, 0.5), 9)
+    compare(Logic.vuPeakSegment(0, 0), -1)
+  }
+
+  function test_preferences_have_safe_defaults() {
+    var d = Logic.parsePreferences("junk")
+    compare(d.onlineLyrics, true)
+    compare(d.webArt, true)
+    compare(d.rememberStations, true)
+    compare(d.hideWhenIdle, false)
+    compare(d.seekStep, 5)
+    compare(d.volumeStep, 5)
+    compare(d.musicFolder, "")
+    compare(d.playlistFolder, "")
+    compare(d.musicPlayer, "")
+  }
+
+  function test_preferences_round_trip_and_reject_junk_values() {
+    var saved = Logic.parsePreferences(Logic.serializePreferences({
+      onlineLyrics: false, webArt: false, rememberStations: false, hideWhenIdle: true,
+      seekStep: 30, volumeStep: 2, musicFolder: "/data/Tunes", musicPlayer: "mpv.desktop",
+    }))
+    compare(saved.onlineLyrics, false)
+    compare(saved.webArt, false)
+    compare(saved.rememberStations, false)
+    compare(saved.hideWhenIdle, true)
+    compare(saved.seekStep, 30)
+    compare(saved.volumeStep, 2)
+    compare(saved.musicFolder, "/data/Tunes")
+    compare(Logic.parsePreferences('{"version":1,"playlistFolder":"/data/Lists"}').playlistFolder, "/data/Lists")
+    compare(Logic.parsePreferences('{"version":1,"playlistFolder":"lists/../x"}').playlistFolder, "")
+    compare(saved.musicPlayer, "mpv.desktop")
+    compare(Logic.parsePreferences('{"version":1,"seekStep":15}').seekStep, 15)
+    var bad = Logic.parsePreferences('{"version":1,"seekStep":7,"volumeStep":"5","musicPlayer":"../evil.desktop","musicFolder":"/a/../b","onlineLyrics":"no"}')
+    compare(bad.seekStep, 5)
+    compare(bad.volumeStep, 5)
+    compare(bad.musicPlayer, "")
+    compare(bad.musicFolder, "")
+    compare(bad.onlineLyrics, true)
+  }
+
+  function test_gio_mime_recommended_apps() {
+    var out = "Default application for \u201caudio/mpeg\u201d: mpv-headless-audio.desktop\n"
+      + "Registered applications:\n\tmpv.desktop\n\tmpv-headless-audio.desktop\n\torg.kde.kdenlive.desktop\n"
+      + "Recommended applications:\n\tmpv.desktop\n\tmpv-headless-audio.desktop\n\tbad name.desktop\n"
+    compare(Logic.parseGioMime(out), ["mpv.desktop", "mpv-headless-audio.desktop"])
+    compare(Logic.parseGioMime(""), [])
+  }
+
+  function test_desktop_names() {
+    compare(Logic.desktopEntryName("[Desktop Entry]\nName=mpv (background audio)\nExec=mpv\n[Desktop Action x]\nName=Other"), "mpv (background audio)")
+    compare(Logic.desktopEntryName("[Other]\nName=Nope"), "")
+    compare(Logic.desktopIdLabel("org.kde.kdenlive.desktop"), "kdenlive")
+    compare(Logic.desktopIdLabel("mpv.desktop"), "mpv")
+    compare(Logic.parseChosenFolder("/home/me/Tunes\n"), "/home/me/Tunes")
+    compare(Logic.parseChosenFolder(""), "")
+  }
+
+  function test_preferences_default_to_the_analyser() {
+    compare(Logic.parsePreferences(Logic.serializePreferences({ visualisation: "mirror" })).visualisation, "mirror")
+    compare(Logic.parsePreferences(Logic.serializePreferences({ visualisation: "oscilloscope" })).visualisation, "oscilloscope")
+    compare(Logic.parsePreferences(Logic.serializePreferences({ visualisation: "nonsense" })).visualisation, "analyser")
+    compare(Logic.parsePreferences("not json").visualisation, "analyser")
+    compare(Logic.parsePreferences('{"version":2,"visualisation":"oscilloscope"}').visualisation, "analyser")
+    compare(Logic.parsePreferences(undefined).visualisation, "analyser")
+  }
+
   // ------------------------------------------------------ parseSpectrumFrame
 
   function test_frame_parses_bars_and_peaks() {
@@ -245,6 +459,24 @@ TestCase {
     // Tiny revisions are metadata settling, not a live stream.
     verify(!Logic.isGrowingLength(221.28, 221.9))
     verify(!Logic.isGrowingLength(221.28, 200))
+  }
+
+  function test_apple_radio_tune_ins_are_recognised() {
+    // Measured in Brave on Apple Music 1, Hits and Country.
+    verify(Logic.looksLikeRadioTuneIn(112.5, 160.2))
+    verify(Logic.looksLikeRadioTuneIn(112.179, 160.149))
+    verify(Logic.looksLikeRadioTuneIn(113.128, 160.149))
+    verify(Logic.looksLikeRadioTuneIn(32.112, 80))       // Apple Music Chill
+  }
+
+  function test_songs_starting_or_resuming_are_not_tune_ins() {
+    verify(!Logic.looksLikeRadioTuneIn(0.2, 200))       // a song starting
+    verify(!Logic.looksLikeRadioTuneIn(150, 160))       // near its end
+    verify(!Logic.looksLikeRadioTuneIn(10, 58))         // too early to tell
+    verify(!Logic.looksLikeRadioTuneIn(92.4, 8899.8))   // a podcast resumed
+    verify(!Logic.looksLikeRadioTuneIn(5.7, 15.9))      // Spotify's placeholder
+    verify(!Logic.looksLikeRadioTuneIn(NaN, 160))
+    verify(!Logic.looksLikeRadioTuneIn(100, 9223372036854.775807))
   }
 
   function test_a_remembered_station_is_only_judged_while_playing() {
@@ -416,6 +648,17 @@ TestCase {
     return p
   }
 
+  function test_a_player_with_no_activity_is_left_out() {
+    // Brave's player for a Discord web app: registered, stopped, no track.
+    verify(!Logic.isActivePlayer(false, false))
+    verify(Logic.isActivePlayer(true, false))
+    verify(Logic.isActivePlayer(false, true))
+    var idle = player("brave", { hasMetadata: false, hasTrack: false, playing: false })
+    compare(Logic.choosePlayer([idle], ""), "")
+    compare(Logic.choosePlayer([idle, player("archamp", {})], ""), "archamp")
+    compare(Logic.choosePlayer([idle], "brave"), "")
+  }
+
   function test_clicking_a_paused_player_switches_to_it() {
     // The bug: Spotify playing, mpv paused, click mpv — nothing happened.
     var entries = [
@@ -497,6 +740,480 @@ TestCase {
     verify(!Logic.isAtTrackEnd(undefined, 200, false))
   }
 
+  // -------------------------------------------------------------- library
+
+  function test_library_root_comes_from_xdg_or_home() {
+    compare(Logic.libraryRoot("/home/me/Music\n", "/home/me"), "/home/me/Music")
+    compare(Logic.libraryRoot("/data/Tunes", "/home/me"), "/data/Tunes")
+    // xdg-user-dir answers $HOME when no music folder is configured.
+    compare(Logic.libraryRoot("/home/me", "/home/me"), "/home/me/Music")
+    compare(Logic.libraryRoot("", "/home/me"), "/home/me/Music")
+    compare(Logic.libraryRoot("relative/path", "/home/me"), "/home/me/Music")
+  }
+
+  function test_paths_are_cleaned() {
+    compare(Logic.cleanPath("/home/me/Music/"), "/home/me/Music")
+    compare(Logic.cleanPath("/home/me/../etc"), "")
+    compare(Logic.cleanPath("/home/./me"), "")
+    compare(Logic.cleanPath("home/me"), "")
+    compare(Logic.cleanPath("/a\u0007b"), "")
+    compare(Logic.cleanPath(undefined), "")
+  }
+
+  function test_the_browser_stays_inside_the_library() {
+    var root = "/home/me/Music"
+    verify(Logic.isInside(root, "/home/me/Music/Journey"))
+    verify(Logic.isInside(root, root))
+    verify(!Logic.isInside(root, "/home/me/MusicVideos"))
+    verify(!Logic.isInside(root, "/home/me"))
+    compare(Logic.libraryFolder(root, "/etc"), root)
+    compare(Logic.libraryFolder(root, "/home/me/Music/../.."), root)
+    compare(Logic.parentFolder(root, "/home/me/Music/Journey/Greatest Hits 2"), "/home/me/Music/Journey")
+    compare(Logic.parentFolder(root, root), root)
+    compare(Logic.libraryCrumb(root, "/home/me/Music/Journey/Greatest Hits 2"), "Music / Journey / Greatest Hits 2")
+    compare(Logic.libraryCrumb(root, root), "Music")
+  }
+
+  // ---------------------------------------------------------------- video
+
+  function test_video_players() {
+    verify(Logic.isVideoPlayer("org.mpris.MediaPlayer2.brave.instance1", "Brave Origin", "", true))
+    verify(Logic.isVideoPlayer("org.mpris.MediaPlayer2.mpv", "mpv", "", false))
+    verify(Logic.isVideoPlayer("org.mpris.MediaPlayer2.vlc", "VLC media player", "vlc", false))
+    verify(Logic.isVideoPlayer("org.mpris.MediaPlayer2.Celluloid", "Celluloid", "io.github.celluloid_player.Celluloid", false))
+    verify(!Logic.isVideoPlayer("org.mpris.MediaPlayer2.archamp", "archamp", "", false))
+    verify(!Logic.isVideoPlayer("org.mpris.MediaPlayer2.spotify", "Spotify", "spotify", false))
+  }
+
+  function test_the_players_window_is_found() {
+    var windows = [
+      { pid: 2128699, title: "Discord | General | Deep-Space" },
+      { pid: 2128699, title: "Never Gonna Give You Up - YouTube - Brave" },
+      { pid: 555, title: "mpv - clip.mkv" },
+    ]
+    compare(Logic.chooseVideoWindow(windows, 2128699, "Never Gonna Give You Up", true), 1)
+    // A browser's only window naming something else is not the video...
+    var discord = { pid: 2128699, title: "Discord | General | Deep-Space", windowClass: "brave-discord.com__channels_@me-Default" }
+    compare(Logic.chooseVideoWindow([discord], 2128699, "Never Gonna Give You Up", true), -1)
+    // ...but its one ordinary window is, even when the page title doesn't name
+    // the track (YouTube TV playing FOX News).
+    var tv = { pid: 2128699, title: "Home - YouTube TV - Brave Origin", windowClass: "brave-origin" }
+    compare(Logic.chooseVideoWindow([discord, tv], 2128699, "FOX News", true), 1)
+    var tv2 = { pid: 2128699, title: "Inbox - Brave Origin", windowClass: "brave-origin" }
+    compare(Logic.chooseVideoWindow([discord, tv, tv2], 2128699, "FOX News", true), -1)
+    compare(Logic.chooseVideoWindow(windows, 555, "clip", false), 2)
+    compare(Logic.chooseVideoWindow(windows, 555, "Different title", false), 2)
+    compare(Logic.chooseVideoWindow(windows, 999, "x", false), -1)
+    compare(Logic.chooseVideoWindow(windows, 0, "x", false), -1)
+  }
+
+  function test_video_aspect_is_bounded() {
+    compare(Logic.videoAspect(1920, 1080), 0.5625)
+    compare(Logic.videoAspect(490, 827), 1)
+    compare(Logic.videoAspect(3000, 600), 0.4)
+    compare(Logic.videoAspect(0, 0), 9 / 16)
+    compare(Logic.parseBusctlUint("u 2128699\n"), 2128699)
+    compare(Logic.parseBusctlUint("s nope"), 0)
+  }
+
+  function test_video_feed_loss() {
+    verify(Logic.sameFrame([1, 2, 3], [1, 2, 3]))
+    verify(!Logic.sameFrame([1, 2, 3], [1, 2, 4]))
+    verify(!Logic.sameFrame(null, [1]))
+    verify(!Logic.sameFrame([], []))
+    var n = 0
+    for (var i = 0; i < Logic.FEED_STALL_SAMPLES; i++) n = Logic.nextStallCount(n, true, true)
+    verify(Logic.feedLost(true, n))
+    verify(!Logic.feedLost(true, n - 1))
+    compare(Logic.nextStallCount(n, false, true), 0)
+    compare(Logic.nextStallCount(n, true, false), 0)
+    verify(Logic.feedLost(false, 0))
+  }
+
+  // ------------------------------------------------------------- playlist
+
+  function test_track_ids_are_object_paths() {
+    compare(Logic.parseTrackIds('{"type":"ao","data":["/org/archamp/track/0","/org/archamp/track/1"]}'),
+      ["/org/archamp/track/0", "/org/archamp/track/1"])
+    compare(Logic.parseTrackIds('{"type":"ao","data":["/ok","bad path","/x/../y","/org/mpris/MediaPlayer2/TrackList/NoTrack"]}'),
+      ["/ok", "/org/mpris/MediaPlayer2/TrackList/NoTrack"])
+    compare(Logic.parseTrackIds('{"type":"as","data":["/a"]}'), [])
+    compare(Logic.parseTrackIds("junk"), [])
+    verify(!Logic.isObjectPath("/a/"))
+    verify(!Logic.isObjectPath("/a;rm"))
+  }
+
+  function test_wrapped_track_ids_read_as_paths() {
+    compare(Logic.objectPathText('QVariant(QDBusObjectPath, QDBusObjectPath("/org/archamp/track/13"))'), "/org/archamp/track/13")
+    compare(Logic.objectPathText("/org/archamp/track/13"), "/org/archamp/track/13")
+    compare(Logic.objectPathText('QDBusObjectPath("not a path")'), "")
+    compare(Logic.objectPathText(undefined), "")
+  }
+
+  function test_tracks_metadata_parses() {
+    var json = '{"type":"aa{sv}","data":[[{"mpris:trackid":{"type":"o","data":"/org/archamp/track/0"},'
+      + '"xesam:title":{"type":"s","data":"Eat the Elephant"},"xesam:artist":{"type":"as","data":["A Perfect Circle"]},'
+      + '"mpris:length":{"type":"x","data":313701587},"xesam:url":{"type":"s","data":"file:///m/Eat%20the%20Elephant.m4a"}},'
+      + '{"mpris:trackid":{"type":"o","data":"not a path"}}]]}'
+    var meta = Logic.parseTracksMetadata(json)
+    compare(Object.keys(meta), ["/org/archamp/track/0"])
+    compare(meta["/org/archamp/track/0"].title, "Eat the Elephant")
+    compare(meta["/org/archamp/track/0"].artist, "A Perfect Circle")
+    compare(meta["/org/archamp/track/0"].length, 313.701587)
+    compare(meta["/org/archamp/track/0"].path, "/m/Eat the Elephant.m4a")
+    compare(Logic.parseTracksMetadata("junk"), {})
+  }
+
+  function test_active_playlist_name() {
+    compare(Logic.activePlaylistName('{"type":"(b(oss))","data":[true,["/org/x/1","Road Trip Mix",""]]}'), "Road Trip Mix")
+    compare(Logic.activePlaylistName('{"type":"(b(oss))","data":[false,["/","",""]]}'), "")
+    compare(Logic.activePlaylistName('{"type":"s","data":"Nope"}'), "")
+    compare(Logic.activePlaylistName("junk"), "")
+    compare(Logic.playlistHeading("Road Trip Mix"), "ROAD TRIP MIX")
+    compare(Logic.playlistHeading(""), "PLAYLIST")
+  }
+
+  function test_track_numbers_are_padded() {
+    compare(Logic.trackNumber(1, 12), "01")
+    compare(Logic.trackNumber(12, 12), "12")
+    compare(Logic.trackNumber(7, 150), "007")
+    compare(Logic.trackNumber(3, 5), "03")
+  }
+
+  function test_playlist_progress() {
+    var ids = ["/t/0", "/t/1", "/t/2"]
+    var meta = { "/t/0": { length: 300 }, "/t/1": { length: 200 }, "/t/2": { length: 100 } }
+    compare(Logic.playlistProgress(ids, meta, "/t/1", 50), { index: 2, count: 3, elapsed: 350, total: 600 })
+    compare(Logic.playlistProgress(ids, meta, "/t/1", 999), { index: 2, count: 3, elapsed: 500, total: 600 })
+    compare(Logic.playlistProgress(ids, meta, "/elsewhere", 50), { index: 0, count: 3, elapsed: 0, total: 600 })
+    compare(Logic.playlistProgress([], {}, "/t/0", 5), { index: 0, count: 0, elapsed: 0, total: 0 })
+  }
+
+  // --------------------------------------------------------------- lyrics
+
+  function test_lrc_parses_times_and_skips_tags() {
+    var lrc = "[ar:Journey]\n[ti:Of a Lifetime]\n[00:12.50]First line\n[00:05.00]Earlier line\n[01:02]Minute line\n\n"
+    var parsed = Logic.parseLrc(lrc)
+    verify(parsed.synced)
+    compare(parsed.lines.length, 3)
+    compare(parsed.lines[0], { time: 5, text: "Earlier line" })
+    compare(parsed.lines[1], { time: 12.5, text: "First line" })
+    compare(parsed.lines[2].time, 62)
+  }
+
+  function test_lrc_repeated_stamps_and_offset() {
+    var parsed = Logic.parseLrc("[offset:+500]\n[00:10.00][00:40.00]Chorus")
+    compare(parsed.lines.length, 2)
+    compare(parsed.lines[0], { time: 9.5, text: "Chorus" })
+    compare(parsed.lines[1].time, 39.5)
+  }
+
+  function test_plain_lyrics_have_no_times() {
+    var parsed = Logic.parseLrc("Line one\r\nLine two\n")
+    verify(!parsed.synced)
+    compare(parsed.lines, [{ time: -1, text: "Line one" }, { time: -1, text: "Line two" }])
+    compare(Logic.parseLrc(undefined).lines, [])
+  }
+
+  function test_lrc_text_is_cleaned_and_bounded() {
+    var parsed = Logic.parseLrc("[00:01.00]bad\u0007bell")
+    compare(parsed.lines[0].text, "badbell")
+    var long = "[00:01.00]" + new Array(2000).join("x")
+    compare(Logic.parseLrc(long).lines[0].text.length, Logic.MAX_LYRIC_LINE_LENGTH)
+  }
+
+  function test_active_line_follows_the_position() {
+    var lines = [{ time: 5, text: "a" }, { time: 12.5, text: "b" }, { time: 62, text: "c" }]
+    compare(Logic.activeLyricIndex(lines, 0), -1)
+    compare(Logic.activeLyricIndex(lines, 4.8), 0)
+    compare(Logic.activeLyricIndex(lines, 30), 1)
+    compare(Logic.activeLyricIndex(lines, 500), 2)
+    compare(Logic.activeLyricIndex(lines, NaN), -1)
+  }
+
+  function test_lrc_sits_beside_the_track() {
+    compare(Logic.lrcPathFor("/m/Journey/01 - Of a Lifetime.mp3"), "/m/Journey/01 - Of a Lifetime.lrc")
+    compare(Logic.lrcPathFor("/m/v1.2/track"), "/m/v1.2/track.lrc")
+    compare(Logic.lrcPathFor("relative.mp3"), "")
+  }
+
+  function test_lrclib_urls() {
+    compare(Logic.lrclibUrl("Journey", "Of a Lifetime", "Journey", 410.6),
+      "https://lrclib.net/api/get?artist_name=Journey&track_name=Of%20a%20Lifetime&album_name=Journey&duration=411")
+    compare(Logic.lrclibUrl("A&B", "Q?", "", 0), "https://lrclib.net/api/search?artist_name=A%26B&track_name=Q%3F")
+    compare(Logic.lrclibUrl("", "Title", "", 200), "")
+    compare(Logic.lrclibUrl("Artist", "", "", 200), "")
+  }
+
+  function test_lrclib_responses() {
+    var synced = Logic.parseLrclib('{"syncedLyrics":"[00:01.00]Hi","plainLyrics":"Hi"}')
+    verify(synced.found && synced.lyrics.synced)
+    var plain = Logic.parseLrclib('{"syncedLyrics":null,"plainLyrics":"Hi\\nThere"}')
+    verify(plain.found && !plain.lyrics.synced)
+    compare(plain.lyrics.lines.length, 2)
+    verify(Logic.parseLrclib('{"instrumental":true}').instrumental)
+    var search = Logic.parseLrclib('[{"plainLyrics":"p"},{"syncedLyrics":"[00:02.00]s"}]')
+    verify(search.lyrics.synced)
+    verify(!Logic.parseLrclib('{"code":404,"message":"Failed to find"}').found)
+    verify(!Logic.parseLrclib("nope").found)
+  }
+
+  function test_lyrics_cache_remembers_and_retries_misses() {
+    var key = Logic.lyricsKey("Journey", "Of a Lifetime", "Journey", 411)
+    var cache = Logic.rememberLyrics([], { key: key, at: 1000, found: true, instrumental: false, text: "[00:01.00]Hi" })
+    cache = Logic.rememberLyrics(cache, { key: "miss", at: 1000, found: false, instrumental: false, text: "" })
+    compare(Logic.cachedLyrics(cache, key, 2000).text, "[00:01.00]Hi")
+    verify(Logic.cachedLyrics(cache, "miss", 2000) !== null)
+    compare(Logic.cachedLyrics(cache, "miss", 1000 + Logic.LYRICS_MISS_RETRY_MS + 1), null)
+    var round = Logic.parseLyricsCache(Logic.serializeLyricsCache(cache))
+    compare(round.length, 2)
+    compare(round[0].key, "miss")
+    compare(Logic.parseLyricsCache("junk"), [])
+  }
+
+  function test_skip_icons_follow_the_step() {
+    compare(Logic.skipIcon(10, true), String.fromCodePoint(0xF0D71))
+    compare(Logic.skipIcon(5, false), "\u{F11F9}")
+    compare(Logic.skipIcon(30, false), "\u{F0D96}")
+    compare(Logic.skipIcon(15, true), String.fromCodePoint(0xF193A))
+    compare(Logic.skipIcon(7, true), "\u{F0211}")
+  }
+
+  function test_updates() {
+    compare(Logic.parseVersion("v2.10.3"), [2, 10, 3])
+    compare(Logic.parseVersion("2.0"), null)
+    compare(Logic.parseVersion("2.0.0-beta"), null)
+    verify(Logic.isNewerVersion("2.1.0", "2.0.0"))
+    verify(Logic.isNewerVersion("v2.0.10", "2.0.9"))
+    verify(!Logic.isNewerVersion("2.0.0", "2.0.0"))
+    verify(!Logic.isNewerVersion("1.9.9", "2.0.0"))
+    verify(!Logic.isNewerVersion("junk", "2.0.0"))
+    var r = Logic.parseLatestRelease(JSON.stringify({ tag_name: "v2.1.0", published_at: "2026-10-01T12:00:00Z",
+      body: "Hello\r\n\r\n\r\n![shot](https://x/y.png)\n<img src=x>**New**", draft: false, prerelease: false }))
+    compare(r.version, "2.1.0")
+    compare(r.tag, "v2.1.0")
+    compare(r.published, "2026-10-01")
+    compare(r.url, "https://github.com/lancefaul/omarchy-omedia-controls/releases/tag/v2.1.0")
+    compare(r.notes, "Hello\n\n**New**")
+    compare(Logic.releaseNotesText("## New\n\n### Playlists\n- one"), "## New\n\n**Playlists**\n- one")
+    var sections = Logic.releaseNoteSections("Intro line\n\n## New\n- one\n\n---\n\nLoose end\n\n# Fixed\n- two")
+    compare(sections.length, 4)
+    compare(sections[0], { title: "", body: "Intro line" })
+    compare(sections[1], { title: "NEW", body: "- one" })
+    compare(sections[2], { title: "", body: "Loose end" })
+    compare(sections[3], { title: "FIXED", body: "- two" })
+    compare(Logic.releaseNoteSections(""), [])
+    compare(Logic.parseLatestRelease(JSON.stringify({ tag_name: "v2.1.0", prerelease: true })), null)
+    compare(Logic.parseLatestRelease(JSON.stringify({ tag_name: "nightly" })), null)
+    compare(Logic.parseLatestRelease("junk"), null)
+    verify(Logic.updateCheckDue(0, 1000))
+    verify(!Logic.updateCheckDue(1000, 1000 + 60000))
+    verify(Logic.updateCheckDue(1000, 1000 + Logic.UPDATE_CHECK_INTERVAL_MS))
+    verify(Logic.updateCheckDue(5000, 1000))
+    compare(Logic.UPDATE_COMMAND, ["omarchy", "plugin", "update", "lancefaul.omedia-controls", "--yes"])
+    var c = Logic.parseUpdateCache(JSON.stringify({ checkedAt: 99, release: { version: "2.1.0", url: "https://evil.example/", notes: "x" } }))
+    compare(c.checkedAt, 99)
+    compare(c.release.url, "https://github.com/lancefaul/omarchy-omedia-controls/releases/")
+    compare(Logic.parseUpdateCache("junk"), { checkedAt: 0, release: null, attempt: null })
+    compare(Logic.parseUpdateCache(JSON.stringify({ attempt: { version: "2.1.0", at: 5 } })).attempt, { version: "2.1.0", at: 5 })
+    compare(Logic.parseUpdateCache(JSON.stringify({ attempt: { version: "x" } })).attempt, null)
+    compare(Logic.updateAttemptState({ version: "2.1.0", at: 1000 }, "2.1.0", 2000), "applied")
+    compare(Logic.updateAttemptState({ version: "2.1.0", at: 1000 }, "2.2.0", 2000), "applied")
+    compare(Logic.updateAttemptState({ version: "2.1.0", at: 1000 }, "2.0.0", 2000), "")
+    compare(Logic.updateAttemptState({ version: "2.1.0", at: 1000 }, "2.0.0", 1000 + Logic.UPDATE_ATTEMPT_TIMEOUT_MS), "failed")
+    compare(Logic.updateAttemptState(null, "2.0.0", 2000), "")
+    compare(Logic.RESTART_COMMAND, ["omarchy", "restart", "shell"])
+    compare(Logic.parsePreferences('{"version":1,"updateDismissed":"2.1.0"}').updateDismissed, "2.1.0")
+    compare(Logic.parsePreferences('{"version":1,"updateDismissed":"x"}').updateDismissed, "")
+    compare(Logic.parsePreferences('{"version":1}').updateCheck, true)
+  }
+
+  function test_library_search() {
+    var cmd = Logic.libraryFindCommand("/m/Music")
+    compare(cmd.slice(0, 5), ["find", "/m/Music", "-type", "f", "("])
+    compare(cmd.slice(-4), [")", "-not", "-path", "*/.*"])
+    compare(Logic.libraryFindCommand("relative"), [])
+    var paths = Logic.parseFileList("/m/Music/Avenged Sevenfold/Hail to the King/07 Heretic.m4a\n"
+      + "/m/Music/Journey/Escape/01 Don't Stop Believin'.m4a\n/etc/passwd\n/m/Music/a/../b.mp3\n\n"
+      + "/m/Music/Journey/Escape/10 Open Arms.m4a\n", "/m/Music")
+    compare(paths.length, 3)
+    var hit = Logic.searchLibrary(paths, "/m/Music", "hail heretic")
+    compare(hit.total, 1)
+    compare(hit.results[0], { path: "/m/Music/Avenged Sevenfold/Hail to the King/07 Heretic.m4a",
+      title: "07 Heretic", album: "Hail to the King", artist: "Avenged Sevenfold" })
+    compare(Logic.searchLibrary(paths, "/m/Music", "dont stop").total, 1)
+    compare(Logic.searchLibrary(paths, "/m/Music", "JOURNEY").results.map(function(r) { return r.title }),
+      ["01 Don't Stop Believin'", "10 Open Arms"])
+    compare(Logic.searchLibrary(paths, "/m/Music", "m4a").total, 0)
+    compare(Logic.searchLibrary(paths, "/m/Music", "a").total, 0)
+    compare(Logic.searchLibrary(paths, "/m/Music", "journey", 1).results.length, 1)
+    compare(Logic.searchLibrary(paths, "/m/Music", "journey", 1).total, 2)
+    compare(Logic.searchText("Don’t  Stop!"), "dont stop")
+    compare(Logic.searchCountText({ results: [1], total: 1 }), "1 result")
+    compare(Logic.searchCountText({ results: [1, 2], total: 9 }), "Showing 2 of 9")
+  }
+
+  function test_playlist_names() {
+    compare(Logic.playlistsFolder("/home/me/Music"), "/home/me/Music/Playlists")
+    compare(Logic.playlistsFolder("relative"), "")
+    compare(Logic.playlistFileName("  Road  trip "), "Road trip.m3u")
+    compare(Logic.playlistFileName("../../etc/passwd"), "etc passwd.m3u")
+    compare(Logic.playlistFileName("a/b\\c"), "a b c.m3u")
+    compare(Logic.playlistFileName("...hidden"), "hidden.m3u")
+    compare(Logic.playlistFileName("Mix.M3U"), "Mix.m3u")
+    compare(Logic.playlistFileName("   "), "")
+    compare(Logic.playlistFileName("x".repeat(200)).length, 80 + 4)
+    compare(Logic.playlistDisplayName("/m/Playlists/Road trip.m3u8"), "Road trip")
+    verify(Logic.playlistNameTaken(["Road Trip.m3u"], "road trip.m3u", ""))
+    verify(!Logic.playlistNameTaken(["Road Trip.m3u"], "road trip.m3u", "Road Trip.m3u"))
+    verify(!Logic.playlistNameTaken(["Other.m3u"], "road trip.m3u", ""))
+  }
+
+  function test_m3u_round_trip() {
+    var text = "﻿#EXTM3U\n#EXTINF:123,Artist - Song\n/m/a.mp3\n# note\nsub/b.flac\n"
+      + "file:///m/c%20d.m4a\nhttps://radio.example/stream\n../up.mp3\n\n#EXTINF:1,orphan\n"
+    var e = Logic.parseM3u(text, "/m/Playlists")
+    compare(e.length, 4)
+    compare(e[0].location, "/m/a.mp3")
+    compare(e[0].info, "#EXTINF:123,Artist - Song")
+    compare(e[1].location, "/m/Playlists/sub/b.flac")
+    compare(e[1].info, "")
+    compare(e[2].location, "/m/c d.m4a")
+    compare(e[3].location, "https://radio.example/stream")
+    compare(Logic.serializeM3u(e),
+      "#EXTM3U\n#EXTINF:123,Artist - Song\n/m/a.mp3\n/m/Playlists/sub/b.flac\n/m/c d.m4a\nhttps://radio.example/stream\n")
+    compare(Logic.serializeM3u([{ location: "/m/x\ny.mp3" }, { location: "/m/ok.mp3", info: "not extinf" }]),
+      "#EXTM3U\n/m/ok.mp3\n")
+  }
+
+  function test_add_track_commands_keep_order() {
+    var cmds = Logic.addTrackCommands("org.mpris.MediaPlayer2.archamp", ["/m/a b.mp3", "bad", "/m/c.mp3"], "/org/archamp/track/4")
+    compare(cmds.length, 2)
+    compare(cmds[0].slice(-3), ["file:///m/c.mp3", "/org/archamp/track/4", "false"])
+    compare(cmds[1][cmds[1].length - 3], "file:///m/a%20b.mp3")
+    compare(Logic.addTrackCommands("x", ["/m/a.mp3"], "")[0][9], "/org/mpris/MediaPlayer2/TrackList/NoTrack")
+  }
+
+  function test_playlist_link_state() {
+    var file = ["/m/a.m4a", "/m/b.m4a", "/m/c.m4a"]
+    compare(Logic.playlistLinkState(["/m/a.m4a", "/m/b.m4a", "/m/c.m4a"], file), "same")
+    compare(Logic.playlistLinkState(["/m/b.m4a", "/m/a.m4a", "/m/c.m4a"], file), "edited")
+    compare(Logic.playlistLinkState(["/m/a.m4a"], file), "edited")
+    compare(Logic.playlistLinkState(["/m/x.m4a", "/m/y.m4a"], file), "unrelated")
+    compare(Logic.playlistLinkState([], file), "same")
+    var kept = Logic.entriesWithInfo(["/m/b.m4a", "/m/new.m4a"], [{ location: "/m/b.m4a", info: "#EXTINF:1,B" }])
+    compare(kept, [{ location: "/m/b.m4a", info: "#EXTINF:1,B" }, { location: "/m/new.m4a", info: "" }])
+  }
+
+  function test_queue_matches_saved_playlist() {
+    var saved = { "Nightmare.m3u": ["/m/a.m4a", "/m/b.m4a"], "Other.m3u": ["/m/a.m4a"] }
+    compare(Logic.matchingPlaylistName(["/m/a.m4a", "/m/b.m4a"], saved), "Nightmare")
+    compare(Logic.matchingPlaylistName(["/m/b.m4a", "/m/a.m4a"], saved), "")
+    compare(Logic.matchingPlaylistName(["/m/a.m4a"], saved), "Other")
+    compare(Logic.matchingPlaylistName([], saved), "")
+    compare(Logic.matchingPlaylistName(["/m/a.m4a"], null), "")
+    compare(Logic.matchingPlaylistFile(["/m/a.m4a", "/m/b.m4a"], saved), "Nightmare.m3u")
+  }
+
+  function test_playlist_editing() {
+    var e = Logic.entriesFromPaths(["/m/a.mp3", "bad", "/m/b.mp3"])
+    compare(e.length, 2)
+    e = Logic.appendEntries(e, ["/m/c.mp3", "/m/a.mp3"])
+    compare(e.map(function(x) { return x.location }), ["/m/a.mp3", "/m/b.mp3", "/m/c.mp3", "/m/a.mp3"])
+    compare(Logic.moveEntry(e, 0, 1)[1].location, "/m/a.mp3")
+    compare(Logic.moveEntry(e, 0, -1), e)
+    compare(Logic.moveEntry(e, 3, 1), e)
+    compare(Logic.removeEntry(e, 1).length, 3)
+    compare(Logic.removeEntry(e, 9).length, 4)
+    var label = Logic.playlistEntryLabel({ location: "/m/Album/01 Song.m4a", info: "" })
+    compare(label.title, "01 Song")
+    compare(label.folder, "Album")
+    compare(Logic.playlistEntryLabel({ location: "/m/x.mp3", info: "#EXTINF:5,Named" }).title, "Named")
+    compare(Logic.playlistEntryLabel({ location: "https://r.example/s" }).folder, "")
+  }
+
+  function test_selection_elsewhere_is_counted() {
+    compare(Logic.selectedElsewhere(["/m/a.mp3", "/n/b.mp3"], ["/m/a.mp3", "/m/c.mp3"]), 1)
+    compare(Logic.selectedElsewhere(["/m/a.mp3"], ["/m/a.mp3"]), 0)
+    compare(Logic.selectedElsewhere(["/n/b.mp3"], []), 1)
+    compare(Logic.selectedElsewhere(null, ["/m/a.mp3"]), 0)
+  }
+
+  function test_selection_toggles_in_pick_order() {
+    var sel = Logic.toggleSelection([], "/m/b.mp3")
+    sel = Logic.toggleSelection(sel, "/m/a.mp3")
+    compare(sel, ["/m/b.mp3", "/m/a.mp3"])
+    compare(Logic.toggleSelection(sel, "/m/b.mp3"), ["/m/a.mp3"])
+    compare(Logic.toggleSelection(sel, "/m/../x"), sel)
+  }
+
+  function test_shift_click_selects_a_run() {
+    var folder = ["/m/1.mp3", "/m/2.mp3", "/m/3.mp3", "/m/4.mp3"]
+    compare(Logic.selectRange(["/m/1.mp3"], folder, "/m/1.mp3", "/m/3.mp3"), ["/m/1.mp3", "/m/2.mp3", "/m/3.mp3"])
+    compare(Logic.selectRange([], folder, "/m/4.mp3", "/m/2.mp3"), ["/m/2.mp3", "/m/3.mp3", "/m/4.mp3"])
+    compare(Logic.selectRange([], folder, "/elsewhere.mp3", "/m/2.mp3"), ["/m/2.mp3"])
+  }
+
+  function test_playlists_hold_only_clean_paths() {
+    compare(Logic.playlistText(["/m/a b.mp3", "/m/../etc/passwd", "/m/c\nd.mp3", "/m/e.m4a"]),
+      "#EXTM3U\n/m/a b.mp3\n/m/e.m4a\n")
+  }
+
+  function test_paths_become_file_uris() {
+    compare(Logic.pathToFileUri("/home/me/Music/04 - The Party's Over #1.mp3"),
+      "file:///home/me/Music/04%20-%20The%20Party's%20Over%20%231.mp3")
+    compare(Logic.pathToFileUri("relative.mp3"), "")
+  }
+
+  function test_preferences_remember_a_clean_library_folder() {
+    compare(Logic.parsePreferences(Logic.serializePreferences({ libraryDir: "/home/me/Music/Journey" })).libraryDir, "/home/me/Music/Journey")
+    compare(Logic.parsePreferences('{"version":1,"libraryDir":"/home/me/../etc"}').libraryDir, "")
+  }
+
+  // --------------------------------------------------------- format chips
+
+  function test_file_urls_become_safe_paths() {
+    compare(Logic.fileUrlToPath("file:///home/me/Music/Journey/04%20-%20The%20Party's%20Over.mp3"),
+      "/home/me/Music/Journey/04 - The Party's Over.mp3")
+    compare(Logic.fileUrlToPath("https://example.com/a.mp3"), "")
+    compare(Logic.fileUrlToPath("file://host/a.mp3"), "")
+    compare(Logic.fileUrlToPath("file:///a%0Ab.mp3"), "")
+    compare(Logic.fileUrlToPath("file:///a%ZZ.mp3"), "")
+    compare(Logic.fileUrlToPath(["file:///x.flac"]), "/x.flac")
+    compare(Logic.fileUrlToPath(undefined), "")
+  }
+
+  function test_ffprobe_output_parses() {
+    var mp3 = '{"streams":[{"codec_name":"mp3","sample_rate":"44100","channels":2,"bit_rate":"292938"}],"format":{"bit_rate":"295401"}}'
+    compare(Logic.parseFfprobe(mp3), { bitrate: 292938, sampleRate: 44100, channels: 2 })
+    var noStreamRate = '{"streams":[{"sample_rate":"48000","channels":1}],"format":{"bit_rate":"128000"}}'
+    compare(Logic.parseFfprobe(noStreamRate), { bitrate: 128000, sampleRate: 48000, channels: 1 })
+    compare(Logic.parseFfprobe("nope"), { bitrate: 0, sampleRate: 0, channels: 0 })
+    compare(Logic.parseFfprobe('{"streams":[{"bit_rate":"-5","sample_rate":"x"}]}'), { bitrate: 0, sampleRate: 0, channels: 0 })
+  }
+
+  function test_chips_read_like_winamp() {
+    compare(Logic.formatChips({ bitrate: 292938, sampleRate: 44100, channels: 2 }), ["293 kbps", "44 kHz", "stereo"])
+    compare(Logic.formatChips({ sampleRate: 48000, channels: 1 }), ["48 kHz", "mono"])
+    compare(Logic.formatChips({ channels: 6 }), ["5.1"])
+    compare(Logic.formatChips({}), [])
+    compare(Logic.formatChips(null), [])
+    compare(Logic.nodeRate("1/44100"), 44100)
+    compare(Logic.nodeRate("1/7"), 0)
+    compare(Logic.nodeRate("48000"), 0)
+  }
+
+  function test_streams_match_players() {
+    var mpvA = { "application.name": "mpv", "media.name": "Rebirthing - mpv" }
+    var brave = { "application.name": "Brave", "media.name": "Playback" }
+    compare(Logic.streamScore(mpvA, "mpv", "Rebirthing"), 2)
+    compare(Logic.streamScore(mpvA, "mpv", "Of a Lifetime"), 1)
+    compare(Logic.streamScore(brave, "Brave Origin", "Apple Music 1"), 1)
+    compare(Logic.streamScore(brave, "mpv", "x"), 0)
+    compare(Logic.streamScore({}, "mpv", "x"), 0)
+    compare(Logic.streamScore(null, "mpv", "x"), 0)
+  }
+
   // ------------------------------------------------------------- metadata
 
   function test_album_details_joins_what_is_there() {
@@ -526,6 +1243,8 @@ TestCase {
     verify(Logic.isChromiumPlayer("org.mpris.MediaPlayer2.chromium.instance42", ""))
     verify(Logic.isChromiumPlayer("", "/com/brave/MediaPlayer2/TrackList/Track0E71C7E7"))
     verify(Logic.isChromiumPlayer("", "/org/chromium/MediaPlayer2/TrackList/TrackAB12"))
+    // As Quickshell hands it over.
+    verify(Logic.isChromiumPlayer("", 'QVariant(QDBusObjectPath, QDBusObjectPath("/org/chromium/MediaPlayer2/TrackList/TrackAB12"))'))
     verify(!Logic.isChromiumPlayer("org.mpris.MediaPlayer2.mpv", "/0"))
     verify(!Logic.isChromiumPlayer("org.mpris.MediaPlayer2.spotify", "/com/spotify/track/4uLU6hMCjMI75M1A2tKUQC"))
     verify(!Logic.isChromiumPlayer("org.mpris.MediaPlayer2.brave.instance1.evil", ""))
