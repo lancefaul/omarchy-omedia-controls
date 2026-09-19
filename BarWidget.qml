@@ -51,6 +51,15 @@ BarWidget {
     }
   }
 
+  // Every dividing line in the widget. Omarchy's rule is one logical pixel,
+  // which on a fractionally scaled display is a fraction of a device pixel
+  // wider than a row: where it falls on the grid decides whether it comes out
+  // as one crisp row or two dim ones, so a panel of them looks like rules of
+  // two different weights. Two is the same weight wherever it lands.
+  component Rule: PanelSeparator {
+    height: 2
+  }
+
   // A search result: the track, and its artist and album folders beneath.
   component SearchResultRow: BorderSurface {
     id: resultRow
@@ -568,6 +577,9 @@ BarWidget {
   property bool webArt: true
   property bool rememberStations: true
   property bool hideWhenIdle: false
+  // Whether the equalizer's bands are on screen, kept between sessions like
+  // every other choice in this popup.
+  property bool eqShown: false
   property int seekStep: 5
   property int volumeStep: 5
   readonly property bool settingsOpen: root.sidePanel === "settings"
@@ -590,6 +602,7 @@ BarWidget {
       webArt: root.webArt,
       rememberStations: root.rememberStations,
       hideWhenIdle: root.hideWhenIdle,
+      equalizerShown: root.eqShown,
       seekStep: root.seekStep,
       volumeStep: root.volumeStep,
       titleWidth: root.titleWidth,
@@ -601,12 +614,30 @@ BarWidget {
   }
 
   // The apps the desktop recommends for audio, for the music player setting.
+  // Scanned when Settings opens as well as at startup: a player installed
+  // while the shell is running (archamp writes its own desktop entry, for
+  // one) should be in the list without restarting anything.
   property var audioApps: []
 
   Process {
+    id: audioAppScan
     running: true
     command: ["gio", "mime", "audio/mpeg"]
     stdout: StdioCollector { onStreamFinished: root.audioApps = Logic.parseGioMime(text) }
+  }
+
+  onSettingsOpenChanged: {
+    if (root.settingsOpen && !audioAppScan.running) audioAppScan.running = true
+    if (root.settingsOpen) root.checkWindowHiding()
+  }
+
+  // A player starting or going while Settings is open changes the answer.
+  onPlayersChanged: {
+    if (root.settingsOpen) Qt.callLater(root.checkWindowHiding)
+    // A player that has gone takes its frozen frame with it.
+    var live = []
+    for (var i = 0; i < root.players.length; i++) live.push(root.playerKey(root.players[i]))
+    root.frozenFrames = Logic.keptFrames(root.frozenFrames, live)
   }
 
   // Choosing a music or playlist folder: the desktop's own folder picker.
@@ -1291,6 +1322,234 @@ BarWidget {
     return name
   }
 
+  // ----------------------------------------------------------- equalizer
+  //
+  // MPRIS has nothing for this either, so archamp puts it on an interface of
+  // its own and the panel appears only for a player that answers it. Read as
+  // a whole rather than a property at a time: a band on its own says nothing.
+  property bool playerHasEq: false
+  property var eqBands: []
+  property var eqFrequencies: []
+  property var eqPresets: []
+  property string eqPreset: ""
+  property real eqPreamp: 0
+  property real eqMinGain: -12
+  property real eqMaxGain: 12
+  property bool eqEnabled: false
+  // What the sliders show while a drag is in flight, so they follow the
+  // pointer rather than waiting for the player to answer.
+  property var eqPending: ({})
+
+  // The presets, listed in the side column the way the library lists tracks.
+  readonly property bool eqPresetsOpen: root.sidePanel === "eqpresets"
+
+  function eqBusName() {
+    return root.hideableBus || root.playerBusName()
+  }
+
+  function readEqualizer() {
+    var name = root.eqBusName()
+    if (!name || eqProbe.running) return
+    eqProbe.command = Logic.busctlJsonCommand("call", [name, "/org/mpris/MediaPlayer2",
+      "org.freedesktop.DBus.Properties", "GetAll", "s", Logic.EQ_IFACE])
+    eqProbe.running = true
+  }
+
+  // One GetAll rather than nine round trips, so what the panel draws is one
+  // moment of the equalizer and not nine.
+  Process {
+    id: eqProbe
+    property string answer: ""
+    running: false
+    stdout: StdioCollector { onStreamFinished: eqProbe.answer = text }
+    onExited: {
+      var eq = Logic.parseEqualizer(eqProbe.answer)
+      eqProbe.answer = ""
+      root.playerHasEq = eq.present
+      if (!eq.present) {
+        if (root.eqPresetsOpen) root.sidePanel = ""
+        return
+      }
+      root.eqBands = eq.bands
+      root.eqFrequencies = eq.frequencies
+      root.eqPresets = eq.presets
+      root.eqPreset = eq.preset
+      root.eqPreamp = eq.preamp
+      root.eqEnabled = eq.enabled
+      root.eqMinGain = eq.minimum
+      root.eqMaxGain = eq.maximum
+      root.eqPending = ({})
+    }
+  }
+
+  function setEqEnabled(on) {
+    root.eqEnabled = on
+    setEqProperty("Enabled", "b", [on ? "true" : "false"])
+    eqRefresh.restart()
+  }
+
+  // Saving asks where, with the desktop's own file chooser, as the folder
+  // settings do. archamp takes .eqf and .q1 and nothing else, so the chooser
+  // is pointed at one and the name is completed if it comes back without.
+  function saveEqualizerPreset() {
+    if (eqSaveChooser.running || !root.playerHasEq) return
+    if (!Logic.canSavePreset(root.eqPreset)) return
+    eqSaveChooser.command = ["zenity", "--file-selection", "--save", "--confirm-overwrite",
+      "--title=Save equalizer preset", "--file-filter=Winamp equalizer files | *.eqf *.q1",
+      "--filename=" + Quickshell.env("HOME") + "/equalizer.eqf"]
+    eqSaveChooser.running = true
+  }
+
+  Process {
+    id: eqSaveChooser
+    running: false
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var file = Logic.presetFilePath(text)
+        if (!file) return
+        root.callEqualizer("SavePreset", "s", [file])
+      }
+    }
+  }
+
+  function setEqProperty(name, signature, value) {
+    var bus = root.eqBusName()
+    if (!bus || !root.playerHasEq) return
+    Quickshell.execDetached(Logic.busctlCommand("set-property",
+      [bus, "/org/mpris/MediaPlayer2", Logic.EQ_IFACE, name, signature].concat(value)))
+  }
+
+  function setEqBand(index, db) {
+    var bands = Logic.bandsWith(root.eqBands, index, db, root.eqMinGain, root.eqMaxGain)
+    if (bands.length === 0) return
+    var pending = Object.assign({}, root.eqPending)
+    pending[index] = bands[index]
+    root.eqPending = pending
+    setEqProperty("Bands", "ad", [String(bands.length)].concat(bands.map(String)))
+  }
+
+  function setEqPreamp(db) {
+    var value = Logic.clampGain(db, root.eqMinGain, root.eqMaxGain)
+    root.eqPreamp = value
+    setEqProperty("Preamp", "d", [String(value)])
+  }
+
+  function callEqualizer(member, signature, args) {
+    var bus = root.eqBusName()
+    if (!bus || !root.playerHasEq) return
+    var rest = [bus, "/org/mpris/MediaPlayer2", Logic.EQ_IFACE, member]
+    if (signature) rest = rest.concat([signature]).concat(args)
+    Quickshell.execDetached(Logic.busctlCommand("call", rest))
+    eqRefresh.restart()
+  }
+
+  // The player answers a moment after it is told, so the panel reads it back
+  // rather than trusting what it asked for.
+  Timer {
+    id: eqRefresh
+    interval: 250
+    onTriggered: root.readEqualizer()
+  }
+
+  // While the panel is open, keep it current: the player's own window can move
+  // these sliders too.
+  Timer {
+    running: root.popupOpen && root.playerHasEq
+    interval: 1000
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.readEqualizer()
+  }
+
+  // Hiding the player's window, which MPRIS has no call for: archamp puts it on
+  // org.archamp.Window beside its MPRIS interfaces.
+  //
+  // Every running player is asked, not just the active one. The setting
+  // belongs to the player, and which player is active is whatever last made a
+  // sound — the switch should not come and go because a browser tab started
+  // playing.
+  property string hideableBus: ""
+  property string hideablePlayer: ""
+  property bool playerKeepHidden: false
+  property var hideQueue: []
+
+  function playerNameFor(bus) {
+    for (var i = 0; i < root.players.length; i++) {
+      var p = root.players[i]
+      if (String(p && p.dbusName || "") === bus) return String(p.identity || p.desktopEntry || "the player")
+    }
+    return "the player"
+  }
+
+  function checkWindowHiding() {
+    root.hideableBus = ""
+    root.hideablePlayer = ""
+    root.playerKeepHidden = false
+    if (keepHiddenProbe.running) return
+    // The active player first, so it wins when more than one can hide.
+    var queue = []
+    var seen = ({})
+    var active = root.playerBusName()
+    if (active) { queue.push(active); seen[active] = true }
+    for (var i = 0; i < root.players.length; i++) {
+      var p = root.players[i]
+      if (root.isProxyPlayer(p)) continue
+      var name = String(p && p.dbusName || "")
+      if (!Logic.isMprisBusName(name) || seen[name]) continue
+      seen[name] = true
+      queue.push(name)
+    }
+    root.hideQueue = queue
+    root.probeNextHideable()
+  }
+
+  function probeNextHideable() {
+    if (root.hideQueue.length === 0) return
+    var rest = root.hideQueue.slice()
+    var name = rest.shift()
+    root.hideQueue = rest
+    keepHiddenProbe.running = false
+    keepHiddenProbe.bus = name
+    keepHiddenProbe.command = ["busctl", "--user", "get-property", name, "/org/mpris/MediaPlayer2",
+      "org.archamp.Window", "KeepHidden"]
+    keepHiddenProbe.running = true
+  }
+
+  function setKeepHidden(value) {
+    if (!root.hideableBus) return
+    Quickshell.execDetached(Logic.busctlCommand("set-property",
+      [root.hideableBus, "/org/mpris/MediaPlayer2", "org.archamp.Window", "KeepHidden", "b",
+       value ? "true" : "false"]))
+    root.playerKeepHidden = value
+  }
+
+  // A player without the interface makes busctl fail with nothing on stdout,
+  // which reads as a player that cannot hide, and the next one is asked. The
+  // asking happens in onExited rather than when the stream finishes: the
+  // process is still running at that point, and a probe that starts while the
+  // last one is running does not start at all — which left the switch missing
+  // whenever the first player asked was not the one that could answer.
+  Process {
+    id: keepHiddenProbe
+    property string bus: ""
+    property string answer: ""
+    running: false
+    stdout: StdioCollector { onStreamFinished: keepHiddenProbe.answer = text }
+    onExited: {
+      var answer = keepHiddenProbe.answer
+      keepHiddenProbe.answer = ""
+      var on = /^\s*b\s+true\s*$/.test(answer)
+      if (on || /^\s*b\s+false\s*$/.test(answer)) {
+        root.hideableBus = keepHiddenProbe.bus
+        root.hideablePlayer = root.playerNameFor(keepHiddenProbe.bus)
+        root.playerKeepHidden = on
+        root.hideQueue = []
+        return
+      }
+      root.probeNextHideable()
+    }
+  }
+
   function checkTrackList() {
     root.hasTrackList = false
     root.canEditTracks = false
@@ -1726,8 +1985,13 @@ BarWidget {
   property string libraryDir: ""
   readonly property string libraryFolder: Logic.libraryFolder(root.libraryRoot, root.libraryDir)
   property string desktopAudioApp: ""
-  // The chosen music player, else the desktop's app for audio files.
-  readonly property string audioAppId: root.musicPlayer || root.desktopAudioApp
+  // Whether archamp is installed. `gio mime` is no help here: it lists only
+  // the applications it recommends for audio, and an app can handle audio
+  // without being one of them, so the desktop entry itself is what is asked.
+  property bool archampInstalled: false
+  // The chosen music player, else archamp when it is there, else the desktop's
+  // own app for audio files.
+  readonly property string audioAppId: Logic.defaultAudioApp(root.musicPlayer, root.archampInstalled, root.desktopAudioApp, root.audioApps)
 
   function openLibraryFolder(path) {
     root.libraryDir = Logic.libraryFolder(root.libraryRoot, path)
@@ -1783,8 +2047,21 @@ BarWidget {
     }
   }
 
+  // Installed for this user, or for everyone, or not at all.
+  FileView {
+    id: archampEntry
+    printErrors: false
+    path: Quickshell.env("HOME") + "/.local/share/applications/archamp.desktop"
+    onLoaded: root.archampInstalled = true
+    onLoadFailed: {
+      if (archampEntry.path.indexOf("/usr/share/") !== 0) archampEntry.path = "/usr/share/applications/archamp.desktop"
+      else root.archampInstalled = false
+    }
+  }
+
   // The app the desktop opens audio files with, e.g. mpv-headless-audio.
   Process {
+    id: desktopAudioProbe
     running: true
     command: ["xdg-mime", "query", "default", "audio/mpeg"]
     stdout: StdioCollector {
@@ -1792,6 +2069,26 @@ BarWidget {
         var id = String(text || "").trim()
         root.desktopAudioApp = Logic.isDesktopId(id) ? id : ""
       }
+    }
+  }
+
+  // Choosing a player here only tells this plugin what to use. Making it the
+  // desktop's default as well is a separate thing to want, and a separate
+  // thing to ask for: it changes what opens an audio file everywhere.
+  function makeDesktopDefault() {
+    var command = Logic.setDefaultAudioCommand(root.musicPlayer)
+    if (command.length === 0 || desktopDefaultSetter.running) return
+    desktopDefaultSetter.command = command
+    desktopDefaultSetter.running = true
+  }
+
+  Process {
+    id: desktopDefaultSetter
+    running: false
+    // Ask the desktop again rather than assume it took.
+    onExited: {
+      desktopAudioProbe.running = false
+      desktopAudioProbe.running = true
     }
   }
 
@@ -1825,6 +2122,7 @@ BarWidget {
       root.webArt = prefs.webArt
       root.rememberStations = prefs.rememberStations
       root.hideWhenIdle = prefs.hideWhenIdle
+      root.eqShown = prefs.equalizerShown
       root.seekStep = prefs.seekStep
       root.volumeStep = prefs.volumeStep
       if (!loaded.settingsMigrated) root.savePreferences()
@@ -2334,6 +2632,10 @@ BarWidget {
   // PanelSlider has no canceled signal to hook, so the flag is cleared
   // wherever a drag cannot still be in progress.
   onPopupOpenChanged: {
+    if (root.popupOpen) {
+      Qt.callLater(root.checkWindowHiding)
+      Qt.callLater(root.readEqualizer)
+    }
     root.probeFormat()
     root.loadLyrics()
     if (root.popupOpen && root.updateCheck && Logic.updateCheckDue(root.updateCheckedAt, Date.now())) root.checkForUpdates()
@@ -2347,6 +2649,11 @@ BarWidget {
   onActivePlayerChanged: {
     Qt.callLater(root.checkTrackList)
     Qt.callLater(root.checkPlayerPid)
+    root.playerHasEq = false
+    if (root.popupOpen) {
+      Qt.callLater(root.checkWindowHiding)
+      Qt.callLater(root.readEqualizer)
+    }
     var now = Date.now()
 
     // Leaving a live player: note which, in case it is only re-registering.
@@ -2356,6 +2663,13 @@ BarWidget {
     }
 
     var key = root.playerKey(root.activePlayer)
+    // Only when it is genuinely another player: this handler runs whenever the
+    // choice is re-made, pausing included, and a frozen frame has to survive
+    // that. What is on screen belongs to the player it came from.
+    if (key !== root.activeKey) {
+      root.stashVisualiser(root.activeKey)
+      root.restoreVisualiser(key)
+    }
     root.activeKey = key
 
     // The same live player back under the same name moments later keeps LIVE,
@@ -2539,11 +2853,6 @@ BarWidget {
     onTriggered: root.positionTick++
   }
 
-  // Only captures audio while the popup is open on a playing track, so the
-  // parec monitor stream isn't held open in the background the rest of the
-  // time.
-  property bool visualisationRestarting: false
-
   readonly property real visualiserGain: root.activePlayer && root.activePlayer.volumeSupported && !root.volumeLocked
     ? Logic.visualiserGain(root.activePlayer.volume, Logic.volumeIsCubic(root.activePlayer.dbusName)) : 1
   onVisualiserGainChanged: root.sendVisualiserGain()
@@ -2570,17 +2879,63 @@ BarWidget {
   }
   onVisualiserStreamChanged: root.sendVisualiserStream()
 
+  // A frozen picture belongs to the player it was measured from. Switching
+  // players puts the outgoing one's away and takes the incoming one's out, so
+  // pausing a video, going to look at the music player and coming back finds
+  // the video's analyser exactly where it was left.
+  property var frozenFrames: ({})
+
+  function stashVisualiser(key) {
+    if (!key) return
+    var frame = {
+      bands: root.bands, peaks: root.peaks, scopeColumns: root.scopeColumns,
+      vuLevels: root.vuLevels, vuPeaks: root.vuPeaks
+    }
+    if (!Logic.visualiserFrameHasContent(frame)) return
+    var frames = root.frozenFrames
+    frames[key] = frame
+    root.frozenFrames = frames
+  }
+
+  function restoreVisualiser(key) {
+    var frame = key ? root.frozenFrames[key] : null
+    if (!Logic.visualiserFrameHasContent(frame)) {
+      root.clearVisualiser()
+      return
+    }
+    root.bands = frame.bands
+    root.peaks = frame.peaks
+    root.scopeColumns = frame.scopeColumns
+    root.vuLevels = frame.vuLevels
+    root.vuPeaks = frame.vuPeaks
+  }
+
+  function clearVisualiser() {
+    root.bands = []
+    root.peaks = []
+    root.scopeColumns = []
+    root.vuLevels = [0, 0]
+    root.vuPeaks = [0, 0]
+  }
+
   function sendVisualiserStream() {
     if (specProc.running) specProc.write("stream " + root.visualiserStream + "\n")
   }
 
   Process {
     id: specProc
+    // Only captures audio while the popup is open on a playing track, so the
+    // parec monitor stream isn't held open in the background the rest of the
+    // time.
     running: root.popupOpen && root.activePlayer && root.activePlayer.isPlaying
-      && !root.visualisationRestarting && root.visualisation !== "off"
-    command: root.oscilloscope ? ["python3", root.specScript, "--oscilloscope"]
-      : root.visualisation === "vu" ? ["python3", root.specScript, "--vu"]
-      : ["python3", root.specScript]
+      && root.visualisation !== "off"
+    // Every visualisation at once, from one capture. Each has ballistics —
+    // falling bars, held peaks, a meter that empties over half a second — that
+    // only mean anything if it has been measuring all along, so the one behind
+    // the curtain has to keep running too. It also means switching between
+    // them is instant, and that the picture left frozen on pause is frozen for
+    // all five rather than for whichever one happened to be on screen.
+    command: ["python3", root.specScript, "--all"]
     // Winamp draws before its volume control; the capture is after the
     // player's. The analyser is told how far to scale back up whenever it
     // starts, the player changes or its volume moves. See Logic.visualiserGain.
@@ -2590,31 +2945,27 @@ BarWidget {
       root.sendVisualiserGain()
     }
 
-    // A running Process keeps its old arguments, so switching visualisation
-    // stops it for a moment and starts it again with the new ones.
-    onCommandChanged: {
-      root.bands = []
-      root.peaks = []
-      root.scopeColumns = []
-      root.vuLevels = [0, 0]
-      root.vuPeaks = [0, 0]
-      if (!running) return
-      root.visualisationRestarting = true
-      Qt.callLater(function() { root.visualisationRestarting = false })
-    }
     stdout: SplitParser {
-      // One frame per line. The analyser: nineteen bar levels, a bar, nineteen
-      // peak levels, each 0-1, a peak of -1 having fallen out of sight. The
-      // oscilloscope: "o|top:bottom:row" for 75 columns. Parsing is bounded
-      // and clamped in Logic.parseSpectrumFrame and Logic.parseScopeFrame.
+      // Three lines per frame, one per visualisation. The analyser: nineteen
+      // bar levels, a bar, nineteen peak levels, each 0-1, a peak of -1 having
+      // fallen out of sight. The oscilloscope: "o|top:bottom:row" for 75
+      // columns. The meter: "v|left,right|left peak,right peak". Parsing is
+      // bounded and clamped in Logic.parseSpectrumFrame, parseScopeFrame and
+      // parseVuFrame.
       onRead: function(line) {
-        if (root.visualisation === "vu") {
+        // The audio stops a moment before the capture does, so the last frames
+        // of a pause are the silence after it. Taking them would empty the
+        // meters just as they are meant to hold still.
+        if (!root.activePlayer || !root.activePlayer.isPlaying) return
+        // Which visualisation a line belongs to is the line's own business:
+        // "v|" the meter, "o|" the scope, anything else the analyser.
+        if (line.charAt(0) === "v" && line.charAt(1) === "|") {
           var vu = Logic.parseVuFrame(line)
           root.vuLevels = vu.levels
           root.vuPeaks = vu.peaks
           return
         }
-        if (root.oscilloscope) {
+        if (line.charAt(0) === "o" && line.charAt(1) === "|") {
           root.scopeColumns = Logic.parseScopeFrame(line)
           return
         }
@@ -2624,11 +2975,14 @@ BarWidget {
       }
     }
     onRunningChanged: if (!running) {
-      root.bands = []
-      root.peaks = []
-      root.scopeColumns = []
-      root.vuLevels = [0, 0]
-      root.vuPeaks = [0, 0]
+      // Paused: every visualisation stays where the music left it and carries
+      // on from there when it starts again, rather than collapsing and
+      // springing back up. Every other reason to stop — the popup closing, the
+      // visualiser switched off, a player that has gone — has no frame worth
+      // keeping.
+      if (root.popupOpen && root.activePlayer && !root.activePlayer.isPlaying
+          && root.visualisation !== "off") return
+      root.clearVisualiser()
     }
   }
 
@@ -2731,7 +3085,8 @@ BarWidget {
 
       // Laid out like Omarchy's own panels (network, tailscale): a PanelHero at
       // the top, then sections each introduced by a PanelSectionHeader and closed
-      // by a PanelSeparator. Using the shell's components rather than imitating
+      // by a rule (PanelSeparator, through Rule above). Using the shell's
+      // components rather than imitating
       // them keeps the popup in step with the theme and with any future changes
       // to how those panels look.
       Column {
@@ -2770,7 +3125,7 @@ BarWidget {
           }
         }
 
-        PanelSeparator {
+        Rule {
           visible: updateNotice.visible
           width: parent.width
           foreground: root.bar.foreground
@@ -2839,7 +3194,6 @@ BarWidget {
 
                 // Winamp's analyser is sixteen pixels tall; one level is one of them.
                 readonly property real unit: height / 16
-                readonly property bool playing: root.activePlayer !== null && root.activePlayer.isPlaying
 
                 Repeater {
                   model: 19
@@ -2861,7 +3215,7 @@ BarWidget {
                       width: parent.width
                       height: Math.round(parent.level * 15) * heroSpectrum.unit
                       clip: true
-                      opacity: heroSpectrum.playing ? 0.9 : 0.25
+                      opacity: 0.9
 
                       Column {
                         anchors.bottom: parent.bottom
@@ -2882,7 +3236,7 @@ BarWidget {
 
                     // Winamp draws the peak one level above where it sits.
                     Rectangle {
-                      visible: parent.peak >= 0 && heroSpectrum.playing
+                      visible: parent.peak >= 0
                       width: parent.width
                       height: Math.max(1, heroSpectrum.unit)
                       radius: 0
@@ -2906,7 +3260,6 @@ BarWidget {
                 spacing: Style.space(1)
 
                 readonly property int unit: Math.max(1, Math.floor(height / 16))
-                readonly property bool playing: root.activePlayer !== null && root.activePlayer.isPlaying
 
                 Repeater {
                   model: 19
@@ -2919,7 +3272,7 @@ BarWidget {
 
                     width: Style.space(4)
                     height: heroWinamp5.height
-                    opacity: heroWinamp5.playing ? 0.9 : 0.25
+                    opacity: 0.9
 
                     // Sixteen fixed rows, shown as the level reaches them, so
                     // nothing is created and destroyed as the music moves.
@@ -2937,7 +3290,7 @@ BarWidget {
                     }
 
                     Rectangle {
-                      visible: stripedBar.peak >= 0 && heroWinamp5.playing
+                      visible: stripedBar.peak >= 0
                       width: parent.width
                       height: heroWinamp5.unit
                       y: parent.height - (Math.round(stripedBar.peak * 15) + 1) * heroWinamp5.unit
@@ -2957,7 +3310,6 @@ BarWidget {
                 visible: root.oscilloscope
 
                 readonly property real unit: height / 16
-                readonly property bool playing: root.activePlayer !== null && root.activePlayer.isPlaying
 
                 Repeater {
                   model: 75
@@ -2976,7 +3328,7 @@ BarWidget {
                     color: rowColour || Color.accent
                     // Solid dims the accent away from the middle; the others
                     // carry that in their colours.
-                    opacity: (column && !rowColour ? Logic.scopeBrightness(column.row) : 1) * (heroScope.playing ? 1 : 0.25)
+                    opacity: column && !rowColour ? Logic.scopeBrightness(column.row) : 1
                   }
                 }
               }
@@ -2991,8 +3343,6 @@ BarWidget {
                 anchors.centerIn: parent
                 visible: root.mirror
                 spacing: Style.space(1)
-
-                readonly property bool playing: root.activePlayer !== null && root.activePlayer.isPlaying
 
                 Repeater {
                   model: Logic.MIRROR_BARS
@@ -3013,7 +3363,7 @@ BarWidget {
                       // Square, like the analyser and Omarchy's own edges.
                       radius: 0
                       color: Logic.spectrumColorAt(root.visRows, Math.min(root.visualiserCap, parent.level))
-                      opacity: heroMirror.playing ? 0.9 : 0.25
+                      opacity: 0.9
 
                       Behavior on height {
                         NumberAnimation { duration: 90; easing.type: Easing.OutQuad }
@@ -3036,8 +3386,6 @@ BarWidget {
                 // same proportion as at the original 28-unit height.
                 spacing: Math.round(heroVis.height * 4 / 28)
 
-                readonly property bool playing: root.activePlayer !== null && root.activePlayer.isPlaying
-
                 Repeater {
                   model: 2
 
@@ -3054,13 +3402,13 @@ BarWidget {
 
                       Rectangle {
                         required property int index
-                        readonly property bool isPeak: heroVu.playing && index === vuChannel.peakSegment && index >= vuChannel.lit - 1
+                        readonly property bool isPeak: index === vuChannel.peakSegment && index >= vuChannel.lit - 1
                         width: Style.space(4)
                         height: Math.round(heroVis.height * 8 / 28)
                         radius: 0
                         color: isPeak ? root.visPeak : Logic.vuSegmentColor(root.visRows, index)
                         opacity: isPeak ? 0.9
-                          : index < vuChannel.lit && heroVu.playing ? 0.9
+                          : index < vuChannel.lit ? 0.9
                           : 0.15
                       }
                     }
@@ -3087,7 +3435,7 @@ BarWidget {
           }
         }
 
-        PanelSeparator {
+        Rule {
           id: heroSeparator
           width: parent.width
           foreground: root.bar.foreground
@@ -3222,7 +3570,7 @@ BarWidget {
                 }
 
                 Column {
-                  width: parent.width - rowPlayPause.width - rowClose.width
+                  width: parent.width - rowPlayPause.width - rowOpen.width - rowClose.width
                     - parent.spacing * (rowClose.visible ? 2 : 1)
                   spacing: Style.space(1)
                   anchors.verticalCenter: parent.verticalCenter
@@ -3250,6 +3598,29 @@ BarWidget {
                   }
                 }
 
+                // Brings the player's own window up and gets out of the way.
+                // Not every player implements Raise — a browser tab has no
+                // window of its own to raise — so it shows only for those
+                // that say they can.
+                Button {
+                  id: rowOpen
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: !!(sourceRow.player && sourceRow.player.canRaise)
+                  width: visible ? implicitWidth : 0
+                  bordered: true
+                  iconText: "󰏌"
+                  iconSize: Style.font.caption
+                  foreground: root.bar.foreground
+                  horizontalPadding: Style.space(5)
+                  verticalPadding: Style.space(1)
+                  tooltipText: "Open " + (sourceRow.player ? (sourceRow.player.identity || "player") : "player")
+                  onClicked: {
+                    if (!sourceRow.player || !sourceRow.player.canRaise) return
+                    sourceRow.player.raise()
+                    root.close()
+                  }
+                }
+
                 // Closes the player itself, for one left open by accident.
                 // Only for players that say they can quit, such as mpv; a
                 // browser tab belongs to the page and offers no such thing.
@@ -3272,7 +3643,7 @@ BarWidget {
           }
         }
 
-        PanelSeparator {
+        Rule {
           visible: root.sourcePlayers.length > 1
           width: parent.width
           foreground: root.bar.foreground
@@ -3373,7 +3744,7 @@ BarWidget {
           }
         }
 
-        PanelSeparator {
+        Rule {
           visible: root.showPlaylistBar
           width: parent.width
           foreground: root.bar.foreground
@@ -3617,8 +3988,13 @@ BarWidget {
             // full, in the accent, with no knob to suggest it can be dragged —
             // the way YouTube draws its own live bar.
             opacity: enabled || root.isLive ? 1.0 : 0.4
-            fillColor: root.isLive ? Color.accent : root.bar.foreground
-            knobColor: root.isLive ? "transparent" : root.bar.foreground
+            // Pulled back from the full foreground for the same reason as the
+            // equalizer bands: a bright bar on a dark track is louder than what
+            // it is measuring. The knob comes up to full under the pointer.
+            fillColor: root.isLive ? Color.accent : Qt.darker(root.bar.foreground, 1.45)
+            knobColor: root.isLive ? "transparent"
+              : seekSlider._hot ? root.bar.foreground
+              : Qt.darker(root.bar.foreground, 1.3)
             // While dragging, the slider owns the value; otherwise it follows
             // playback. Without this the timer would yank the knob back mid-drag.
             value: root.isLive ? 1
@@ -3711,6 +4087,27 @@ BarWidget {
                 opacity: root.hasTimeline ? 1.0 : 0.5
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
+
+                // Winamp blinked its counter while paused. Slowly, and only
+                // part of the way down: this says "stopped here", it is not
+                // asking to be dealt with. Runs only while the popup is open
+                // on a paused track, so nothing animates out of sight.
+                SequentialAnimation {
+                  running: root.popupOpen && root.hasTimeline && root.activePlayer !== null
+                    && !root.activePlayer.isPlaying && !root.seeking
+                  loops: Animation.Infinite
+                  alwaysRunToEnd: true
+                  onStopped: leftTime.opacity = root.hasTimeline ? 1.0 : 0.5
+
+                  NumberAnimation {
+                    target: leftTime; property: "opacity"
+                    to: 0.25; duration: 900; easing.type: Easing.InOutSine
+                  }
+                  NumberAnimation {
+                    target: leftTime; property: "opacity"
+                    to: 1.0; duration: 900; easing.type: Easing.InOutSine
+                  }
+                }
               }
 
               Row {
@@ -3775,7 +4172,7 @@ BarWidget {
           }
         }
 
-        PanelSeparator {
+        Rule {
           width: parent.width
           foreground: root.bar.foreground
         }
@@ -3874,8 +4271,7 @@ BarWidget {
           }
         }
 
-
-        PanelSeparator {
+        Rule {
           width: parent.width
           foreground: root.bar.foreground
         }
@@ -3930,22 +4326,65 @@ BarWidget {
           }
         }
 
-        PanelSeparator {
+        Rule {
           width: parent.width
           foreground: root.bar.foreground
         }
 
-        PanelSectionHeader {
-          text: "VOLUME"
-          foreground: root.bar.foreground
-          fontFamily: root.bar.fontFamily
+        // The switch is the sound itself, on or off, in the header — the same
+        // question PLAYERS and EQUALIZER ask, asked the same way. Off is mute;
+        // on puts back the volume it was muted from.
+        Item {
+          width: parent.width
+          height: volumeHeader.implicitHeight
+          readonly property bool on: !root.hasVolume || root.activePlayer.volume > 0.001
+
+          PanelSectionHeader {
+            id: volumeHeader
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "VOLUME"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+          }
+
+          Row {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(8)
+            opacity: root.hasVolume ? 1.0 : 0.4
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: parent.parent.on ? "On" : "Off"
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+
+              MouseArea {
+                anchors.fill: parent
+                enabled: root.hasVolume
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.toggleMute()
+              }
+            }
+
+            ToggleSwitch {
+              anchors.verticalCenter: parent.verticalCenter
+              checked: parent.parent.on
+              interactive: root.hasVolume
+              foreground: root.bar.foreground
+              onToggled: root.toggleMute()
+            }
+          }
         }
 
         // Volume: a quiet speaker on the left and a loud one on the right, both
         // display-only markers of the same width, so the slider sits centred
-        // and neither end looks clickable. Muting is its own clearly labelled
-        // button underneath — a speaker glyph that silently muted on click was a
-        // control nobody could find.
+        // and neither end looks clickable. Muting is the switch in the header —
+        // a speaker glyph that silently muted on click was a control nobody
+        // could find.
         // Always shown, disabled when the player has no volume to set, for the
         // same reason as the seek bar.
         // Same treatment as speed: a player that won't take a volume says so.
@@ -3993,6 +4432,8 @@ BarWidget {
             step: 0.02
             enabled: root.hasVolume
             opacity: enabled ? 1.0 : 0.4
+            fillColor: Qt.darker(root.bar.foreground, 1.45)
+            knobColor: volumeSlider._hot ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.3)
             value: root.hasVolume ? root.activePlayer.volume : root.lockedVolume
             onMoved: function(v) { root.setVolume(v) }
             onReleased: function(v) { root.setVolume(v) }
@@ -4015,30 +4456,285 @@ BarWidget {
           }
         }
 
-        // Styled like the transport cells — bordered, full width — with a label
-        // so what it does is never a guess. Shows the selected fill while muted,
-        // the same way shuffle and repeat show they are on.
-        Button {
-          width: parent.width
-          bordered: true
-          readonly property bool muted: root.hasVolume && root.activePlayer.volume <= 0.001
-          iconText: muted ? "󰝟" : "󰖁"
-          text: muted ? "Unmute" : "Mute"
-          foreground: root.bar.foreground
-          fontFamily: root.bar.fontFamily
-          enabled: root.hasVolume
-          selected: muted
-          opacity: enabled ? 1.0 : 0.4
-          onClicked: root.toggleMute()
-        }
-
-        PanelSeparator {
+        Rule {
           width: parent.width
           foreground: root.bar.foreground
         }
 
-        // Settings, in the side column. Styled like Mute: bordered, full width,
-        // icon and label.
+        // The player's own equalizer, for a player that offers one. The switch
+        // is the equalizer itself, and the bands appear with it: there is
+        // nothing to adjust on an equalizer that is off.
+        Item {
+          visible: root.playerHasEq
+          width: parent.width
+          // As tall as the header, with the switch centred on it and allowed
+          // past its edges, exactly as PLAYERS does.
+          height: equalizerHeader.implicitHeight
+
+          PanelSectionHeader {
+            id: equalizerHeader
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "EQUALIZER"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+          }
+
+          Row {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(8)
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: root.eqEnabled ? "On" : "Off"
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.setEqEnabled(!root.eqEnabled)
+              }
+            }
+
+            ToggleSwitch {
+              anchors.verticalCenter: parent.verticalCenter
+              checked: root.eqEnabled
+              foreground: root.bar.foreground
+              onToggled: root.setEqEnabled(!root.eqEnabled)
+            }
+
+            // Whether the bands are on screen is a separate question from
+            // whether the equalizer is doing anything: one left switched on is
+            // not one you want taking up the window for the rest of the day.
+            Button {
+              anchors.verticalCenter: parent.verticalCenter
+              bordered: true
+              iconText: root.eqShown ? "󰅃" : "󰅀"
+              iconSize: Style.font.caption
+              foreground: root.bar.foreground
+              horizontalPadding: Style.space(5)
+              verticalPadding: Style.space(1)
+              tooltipText: root.eqShown ? "Hide the bands" : "Show the bands"
+              onClicked: root.setSetting("eqShown", !root.eqShown)
+            }
+          }
+        }
+
+        // Under the header whether or not it is open, so the section is a
+        // section either way; everything below it opens with the switch.
+        Rule {
+          visible: root.playerHasEq
+          width: parent.width
+          foreground: root.bar.foreground
+        }
+
+        Item {
+          visible: root.playerHasEq && root.eqShown
+          width: parent.width
+          height: presetsButton.height
+
+          Text {
+            anchors.left: parent.left
+            anchors.right: presetsButton.left
+            anchors.rightMargin: Style.spacing.md
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            // A shape of one's own belongs to no preset, which is worth saying
+            // rather than leaving the last name sitting there.
+            text: root.eqPreset !== "" ? root.eqPreset : "Custom"
+            elide: Text.ElideRight
+            color: root.bar.foreground
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Button {
+            id: presetsButton
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            bordered: true
+            text: "Presets"
+            selected: root.eqPresetsOpen
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            onClicked: root.toggleSidePanel("eqpresets")
+          }
+        }
+
+        Rule {
+          visible: root.playerHasEq && root.eqShown
+          width: parent.width
+          foreground: root.bar.foreground
+        }
+
+        // The bands themselves: tall enough to aim at, short enough that the
+        // player does not become an equalizer with a player attached.
+        Item {
+          id: equalizerBands
+          visible: root.playerHasEq && root.eqShown
+          // Dimmed while the equalizer is off: still what it is set to, but
+          // plainly not doing anything.
+          opacity: root.eqEnabled ? 1.0 : 0.45
+          width: parent.width
+          height: Style.space(128)
+
+          // What the bands are measured from. Without it a slider halfway up
+          // looks like a setting rather than the absence of one.
+          Repeater {
+            model: [root.eqMaxGain, 0, root.eqMinGain]
+
+            Item {
+              required property int index
+              required property real modelData
+              anchors.left: parent.left
+              anchors.right: parent.right
+              height: 1
+              y: (equalizerBands.height - preampLabel.height - Style.space(4)) * (index / 2)
+
+              Rectangle {
+                anchors.left: scaleLabel.right
+                anchors.leftMargin: Style.space(4)
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                height: 1
+                color: Qt.alpha(root.bar.foreground, modelData === 0 ? 0.22 : 0.10)
+              }
+
+              Text {
+                id: scaleLabel
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: modelData > 0 ? "+" + Math.round(modelData)
+                  : modelData < 0 ? "\u2212" + Math.abs(Math.round(modelData))
+                  : "0"
+                color: Qt.darker(root.bar.foreground, 1.6)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+          }
+
+          Row {
+            id: bandRow
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(22)
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            spacing: Style.space(2)
+
+            EqSlider {
+              id: preampSlider
+              width: Style.space(26)
+              height: parent.height - preampLabel.height - Style.space(4)
+              bar: root.bar
+              minimum: root.eqMinGain
+              maximum: root.eqMaxGain
+              value: root.eqPreamp
+              onMoved: function(v) { root.eqPreamp = v }
+              onReleased: function(v) { root.setEqPreamp(v) }
+
+              Text {
+                id: preampLabel
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: parent.bottom
+                anchors.topMargin: Style.space(4)
+                textFormat: Text.PlainText
+                text: "PRE"
+                color: Qt.darker(root.bar.foreground, 1.5)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            Repeater {
+              model: root.eqBands.length
+
+              EqSlider {
+                id: bandSlider
+                required property int index
+                width: Math.max(Style.space(10),
+                  (bandRow.width - preampSlider.width - bandRow.spacing * root.eqBands.length)
+                  / Math.max(1, root.eqBands.length))
+                height: preampSlider.height
+                bar: root.bar
+                minimum: root.eqMinGain
+                maximum: root.eqMaxGain
+                value: root.eqPending[bandSlider.index] !== undefined
+                  ? root.eqPending[bandSlider.index] : root.eqBands[bandSlider.index]
+                onMoved: function(v) {
+                  var pending = Object.assign({}, root.eqPending)
+                  pending[bandSlider.index] = v
+                  root.eqPending = pending
+                }
+                onReleased: function(v) { root.setEqBand(bandSlider.index, v) }
+
+                Text {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  anchors.top: parent.bottom
+                  anchors.topMargin: Style.space(4)
+                  textFormat: Text.PlainText
+                  text: Logic.bandLabel(root.eqFrequencies[bandSlider.index])
+                  color: Qt.darker(root.bar.foreground, 1.5)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+          }
+        }
+
+        Rule {
+          visible: root.playerHasEq && root.eqShown
+          width: parent.width
+          foreground: root.bar.foreground
+        }
+
+        Row {
+          visible: root.playerHasEq && root.eqShown
+          width: parent.width
+          spacing: Style.spacing.md
+
+          Button {
+            id: eqSaveButton
+            width: (parent.width - parent.spacing) / 2
+            bordered: true
+            text: "Save"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            // Nothing to save while the bands are a preset exactly: it is
+            // already a preset, under a name it already has.
+            enabled: Logic.canSavePreset(root.eqPreset)
+            opacity: enabled ? 1.0 : 0.4
+            tooltipText: enabled ? "Save these bands as a preset file"
+              : "These bands are " + root.eqPreset + " already"
+            onClicked: root.saveEqualizerPreset()
+          }
+
+          Button {
+            width: (parent.width - parent.spacing) / 2
+            height: eqSaveButton.height
+            bordered: true
+            text: "Reset"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            tooltipText: "Every band back to flat"
+            onClicked: root.callEqualizer("Reset", "", [])
+          }
+        }
+
+        Rule {
+          visible: root.playerHasEq && root.eqShown
+          width: parent.width
+          foreground: root.bar.foreground
+        }
+
+        // Settings, in the side column: bordered, full width, icon and label.
         Button {
           width: parent.width
           bordered: true
@@ -4057,7 +4753,7 @@ BarWidget {
         x: column.width + root.libraryGap
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        width: 1
+        width: 2
         color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.12)
       }
 
@@ -4169,7 +4865,7 @@ BarWidget {
           onVisibleChanged: if (!visible) keyCatcher.forceActiveFocus()
         }
 
-        PanelSeparator {
+        Rule {
           id: librarySearchSeparator
           anchors.left: parent.left
           anchors.right: parent.right
@@ -4352,7 +5048,7 @@ BarWidget {
           }
         }
 
-        PanelSeparator {
+        Rule {
           id: librarySeparator
           anchors.left: parent.left
           anchors.right: parent.right
@@ -4429,6 +5125,81 @@ BarWidget {
         }
       }
 
+      // The equalizer's presets, listed the way the library lists tracks:
+      // click one and it is applied, and the one in effect is marked.
+      Item {
+        id: eqPresetsPanel
+        visible: root.eqPresetsOpen
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: root.libraryPanelWidth
+
+        Column {
+          id: eqPresetsTitle
+          anchors.left: parent.left
+          anchors.right: parent.right
+          y: Math.max(0, (column.sideSeparatorY - column.spacing - implicitHeight) / 2)
+          spacing: Style.space(2)
+
+          PanelSectionHeader {
+            text: "PRESETS"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            color: root.bar.foreground
+          }
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.eqPresets.length + (root.eqPresets.length === 1 ? " preset" : " presets")
+            elide: Text.ElideRight
+            color: Qt.darker(root.bar.foreground, 1.4)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        Rule {
+          id: eqPresetsSeparator
+          anchors.left: parent.left
+          anchors.right: parent.right
+          y: column.sideSeparatorY
+          foreground: root.bar.foreground
+        }
+
+        Flickable {
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: eqPresetsSeparator.bottom
+          anchors.topMargin: column.spacing
+          anchors.bottom: parent.bottom
+          clip: true
+          contentHeight: eqPresetColumn.implicitHeight
+          boundsBehavior: Flickable.StopAtBounds
+
+          Column {
+            id: eqPresetColumn
+            width: parent.width
+            spacing: Style.space(2)
+
+            Repeater {
+              model: root.eqPresets
+
+              SearchResultRow {
+                required property string modelData
+                width: parent.width
+                result: ({ title: modelData })
+                picked: modelData === root.eqPreset
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                onChosen: root.callEqualizer("ApplyPreset", "s", [modelData])
+              }
+            }
+          }
+        }
+      }
+
       // Lyrics for the playing track, in the side column. Synced lyrics follow
       // the song, the line being sung lit and kept in view; scroll to read
       // ahead and it waits a few seconds before following again. Click a
@@ -4470,7 +5241,7 @@ BarWidget {
           }
         }
 
-        PanelSeparator {
+        Rule {
           id: lyricsSeparator
           anchors.left: parent.left
           anchors.right: parent.right
@@ -4629,7 +5400,7 @@ BarWidget {
           onClicked: root.startNewPlaylist([], "playlist")
         }
 
-        PanelSeparator {
+        Rule {
           id: playlistSeparator
           anchors.left: parent.left
           anchors.right: parent.right
@@ -4815,7 +5586,7 @@ BarWidget {
           onVisibleChanged: if (!visible) keyCatcher.forceActiveFocus()
         }
 
-        PanelSeparator {
+        Rule {
           id: queueAddSearchSeparator
           visible: root.queueAdding
           anchors.left: parent.left
@@ -5001,7 +5772,7 @@ BarWidget {
           }
         }
 
-        PanelSeparator {
+        Rule {
           id: queueBarSeparator
           anchors.left: parent.left
           anchors.right: parent.right
@@ -5143,7 +5914,7 @@ BarWidget {
           }
         }
 
-        PanelSeparator {
+        Rule {
           id: updateSeparator
           anchors.left: parent.left
           anchors.right: parent.right
@@ -5180,7 +5951,7 @@ BarWidget {
                 width: updateNotesText.width
                 spacing: Style.space(8)
 
-                PanelSeparator {
+                Rule {
                   width: parent.width
                   visible: index > 0
                   foreground: root.bar.foreground
@@ -5232,7 +6003,7 @@ BarWidget {
           anchors.bottom: parent.bottom
           spacing: Style.space(8)
 
-          PanelSeparator { width: parent.width; foreground: root.bar.foreground }
+          Rule { width: parent.width; foreground: root.bar.foreground }
 
           Text {
             width: parent.width
@@ -5411,7 +6182,7 @@ BarWidget {
           }
         }
 
-        PanelSeparator {
+        Rule {
           id: playlistsSeparator
           anchors.left: parent.left
           anchors.right: parent.right
@@ -5859,7 +6630,7 @@ BarWidget {
           }
         }
 
-        PanelSeparator {
+        Rule {
           id: settingsSeparator
           anchors.left: parent.left
           anchors.right: parent.right
@@ -5976,7 +6747,7 @@ BarWidget {
               onToggled: root.setSetting("updateCheck", !root.updateCheck)
             }
 
-            PanelSeparator { width: parent.width; foreground: root.bar.foreground }
+            Rule { width: parent.width; foreground: root.bar.foreground }
 
             // ---------------------------------------------------- visualiser
             PanelSectionHeader {
@@ -6145,7 +6916,7 @@ BarWidget {
               }
             }
 
-            PanelSeparator { width: parent.width; foreground: root.bar.foreground }
+            Rule { width: parent.width; foreground: root.bar.foreground }
 
             // ------------------------------------------------------- library
             PanelSectionHeader {
@@ -6195,7 +6966,7 @@ BarWidget {
               }
             }
 
-            PanelSeparator { width: parent.width; foreground: root.bar.foreground }
+            Rule { width: parent.width; foreground: root.bar.foreground }
 
             // ----------------------------------------------------- playlists
             PanelSectionHeader {
@@ -6245,7 +7016,7 @@ BarWidget {
               }
             }
 
-            PanelSeparator { width: parent.width; foreground: root.bar.foreground }
+            Rule { width: parent.width; foreground: root.bar.foreground }
 
             PanelSectionHeader {
               text: "MUSIC PLAYER"
@@ -6256,7 +7027,10 @@ BarWidget {
             Text {
               width: parent.width
               textFormat: Text.PlainText
-              text: "Plays picks from the library when the active player can't take them."
+              text: "Plays picks from the library when the active player can't take them. "
+                + (root.archampInstalled
+                   ? "Automatic uses archamp, which these controls are built around."
+                   : "Automatic uses whatever your desktop opens audio files with.")
               wrapMode: Text.Wrap
               color: Qt.darker(root.bar.foreground, 1.5)
               font.family: root.bar.fontFamily
@@ -6270,7 +7044,10 @@ BarWidget {
               Button {
                 width: parent.width
                 bordered: true
-                text: "Desktop default" + (root.desktopAudioApp ? " (" + Logic.desktopIdLabel(root.desktopAudioApp) + ")" : "")
+                text: {
+                  var what = Logic.automaticAudioAppLabel(root.archampInstalled, root.desktopAudioApp, root.audioApps)
+                  return "Automatic" + (what ? " (" + what + ")" : "")
+                }
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
                 selected: root.musicPlayer === ""
@@ -6304,7 +7081,43 @@ BarWidget {
               }
             }
 
-            PanelSeparator { width: parent.width; foreground: root.bar.foreground }
+            // Choosing a player above only tells this plugin what to use.
+            // Whether it opens audio files for the whole desktop is the
+            // desktop's own setting, and this is the offer to change it.
+            Button {
+              width: parent.width
+              visible: Logic.canBeDesktopDefault(root.musicPlayer, root.desktopAudioApp)
+              bordered: true
+              text: "Also open audio files everywhere"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              onClicked: root.makeDesktopDefault()
+            }
+
+            Text {
+              width: parent.width
+              visible: root.musicPlayer !== "" && root.musicPlayer === root.desktopAudioApp
+              textFormat: Text.PlainText
+              text: Logic.desktopIdLabel(root.musicPlayer) + " opens audio files for the whole desktop."
+              wrapMode: Text.Wrap
+              color: Qt.darker(root.bar.foreground, 1.5)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            // Only for a player that can hide its own window — archamp does,
+            // over an interface of its own, since MPRIS has no call for it.
+            SettingSwitch {
+              visible: root.hideableBus !== ""
+              label: "Keep " + root.hideablePlayer + "'s window hidden"
+              hint: "It keeps playing with no window: these controls, the media keys and the library all carry on. Opening the player from PLAYERS brings the window back for now, and starting it again from your launcher brings it back too."
+              checked: root.playerKeepHidden
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              onToggled: root.setKeepHidden(!root.playerKeepHidden)
+            }
+
+            Rule { width: parent.width; foreground: root.bar.foreground }
 
             // ------------------------------------------------ lyrics and art
             PanelSectionHeader {
@@ -6373,7 +7186,7 @@ BarWidget {
               }
             }
 
-            PanelSeparator { width: parent.width; foreground: root.bar.foreground }
+            Rule { width: parent.width; foreground: root.bar.foreground }
 
             // ---------------------------------------------- bar and players
             PanelSectionHeader {
@@ -6443,7 +7256,7 @@ BarWidget {
               onToggled: root.setSetting("scrollTitle", !root.scrollTitle)
             }
 
-            PanelSeparator { width: parent.width; foreground: root.bar.foreground }
+            Rule { width: parent.width; foreground: root.bar.foreground }
 
             // ------------------------------------------------------ keyboard
             PanelSectionHeader {

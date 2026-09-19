@@ -192,6 +192,38 @@ function mixHex(a, b, t) {
   return out
 }
 
+// Whether a visualiser frame is a picture of anything. A frozen frame is put
+// away under the player it was measured from when the choice of player moves
+// on, and taken out again when it comes back, so that pausing one player,
+// looking at another and returning finds the first where it was left. What
+// must not be put away is an empty frame: the capture is cleared for reasons
+// that are nothing to do with the player - the popup closing, the visualiser
+// switched off - and stashing that emptiness over a good picture loses it.
+function visualiserFrameHasContent(frame) {
+  if (!frame) return false
+  if (Array.isArray(frame.bands) && frame.bands.length > 0) return true
+  if (Array.isArray(frame.scopeColumns) && frame.scopeColumns.length > 0) return true
+  var vu = frame.vuLevels
+  if (Array.isArray(vu)) {
+    for (var i = 0; i < vu.length; i++) {
+      if (typeof vu[i] === "number" && vu[i] > 0) return true
+    }
+  }
+  return false
+}
+
+// The stash, with the players that are gone dropped from it: a frozen frame
+// outlives a pause, not the player it came from.
+function keptFrames(frames, liveKeys) {
+  var out = {}
+  if (!frames) return out
+  var keys = Array.isArray(liveKeys) ? liveKeys : []
+  for (var key in frames) {
+    if (keys.indexOf(key) !== -1) out[key] = frames[key]
+  }
+  return out
+}
+
 // The colour of each of the sixteen rows, top first. The gradient is the
 // accent itself, from dark at the bottom through the accent to near white at
 // the top, the way Winamp's climbs from green to red: a single-hue Omarchy
@@ -366,6 +398,9 @@ function preferenceDefaults() {
     webArt: true,
     rememberStations: true,
     hideWhenIdle: false,
+    // Whether the equalizer's bands are on screen. Off by default: a player
+    // that opens as an equalizer is not what anyone reached for.
+    equalizerShown: false,
     titleWidth: 260,       // the bar title's widest, in px; 0 is its full length
     scrollTitle: true,     // a bar title too long for its width scrolls
     updateCheck: true,     // ask GitHub for a newer release once a day
@@ -390,6 +425,7 @@ function migrateSettings(prefs, settings) {
   var out = Object.assign({}, prefs)
   var s = settings && typeof settings === "object" ? settings : {}
   if (typeof s.hideWhenIdle === "boolean") out.hideWhenIdle = s.hideWhenIdle
+  if (typeof s.equalizerShown === "boolean") out.equalizerShown = s.equalizerShown
   if (typeof s.pauseOthers === "boolean") out.pauseOthers = s.pauseOthers
   if (s.visualizerEnabled === false) out.visualisation = "off"
   var width = Number(s.maxLabelWidth)
@@ -402,6 +438,228 @@ function migrateSettings(prefs, settings) {
   }
   out.settingsMigrated = true
   return out
+}
+
+// ------------------------------------------------------------- equalizer
+//
+// MPRIS has nothing for an equalizer, so archamp puts one on an interface of
+// its own. Everything here reads what busctl said; nothing is assumed about a
+// player that does not answer.
+var EQ_IFACE = "org.archamp.Equalizer"
+
+// `busctl --json=short get-property` for an array of doubles comes back as
+// {"type":"ad","data":[...]}. [] for anything else, so a player that answers
+// something unexpected draws no bands rather than a broken row of them.
+function parseEqBands(text) {
+  if (typeof text !== "string" || text.length > 65536) return []
+  try {
+    var d = JSON.parse(text)
+    if (!d || d.type !== "ad" || !Array.isArray(d.data)) return []
+    // typeof, not Number(): Number(null) is 0, which would quietly become a
+    // band sitting at flat rather than a value that was never sent.
+    return d.data.filter(function(v) { return typeof v === "number" && isFinite(v) })
+  } catch (e) {
+    return []
+  }
+}
+
+function parseEqNumber(text) {
+  if (typeof text !== "string" || text.length > 4096) return 0
+  try {
+    var d = JSON.parse(text)
+    var n = Number(d && d.data)
+    return isFinite(n) ? n : 0
+  } catch (e) {
+    return 0
+  }
+}
+
+function parseEqBool(text) {
+  if (typeof text !== "string" || text.length > 4096) return false
+  try {
+    var d = JSON.parse(text)
+    return (d && d.data) === true
+  } catch (e) {
+    return false
+  }
+}
+
+function parseEqStrings(text) {
+  if (typeof text !== "string" || text.length > 65536) return []
+  try {
+    var d = JSON.parse(text)
+    if (!d || d.type !== "as" || !Array.isArray(d.data)) return []
+    return d.data.filter(function(v) { return typeof v === "string" }).map(function(v) {
+      return v.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 120)
+    }).slice(0, 60)
+  } catch (e) {
+    return []
+  }
+}
+
+function parseEqString(text) {
+  if (typeof text !== "string" || text.length > 65536) return ""
+  try {
+    var d = JSON.parse(text)
+    if (!d || typeof d.data !== "string") return ""
+    return d.data.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 120)
+  } catch (e) {
+    return ""
+  }
+}
+
+// Every busctl command this plugin runs, built in one place and always with
+// "--" before the positional arguments. Without it busctl reads a negative
+// number as an option and refuses the whole command — which an equalizer hits
+// the moment a band is cut, since half of its range is negative.
+function busctlCommand(verb, args) {
+  return ["busctl", "--user", "--"].concat([verb]).concat(Array.isArray(args) ? args : [])
+}
+
+function busctlJsonCommand(verb, args) {
+  return ["busctl", "--user", "--json=short", "--"].concat([verb]).concat(Array.isArray(args) ? args : [])
+}
+
+// Whether these bands are worth saving. The player names the preset its bands
+// match, band for band and preamp included, or "" for a shape of one's own —
+// so a name means the file would already be on disk under it.
+function canSavePreset(preset) {
+  return firstText(preset) === ""
+}
+
+// Where a preset is to be saved, from the file chooser's answer. archamp
+// takes .eqf and .q1 and refuses anything else, so a name that comes back
+// without one is completed rather than sent to be turned down.
+function presetFilePath(text) {
+  var file = cleanPath(firstText(text))
+  if (!file || file.charAt(0) !== "/") return ""
+  return /\.(eqf|q1)$/i.test(file) ? file : file + ".eqf"
+}
+
+// One GetAll on the equalizer interface, as busctl --json=short prints it:
+// {"type":"a{sv}","data":[{ "Bands": {"type":"ad","data":[...]}, ... }]}.
+// `present` is false for a player that has no such interface, which is how
+// busctl fails — nothing on stdout — as well as for one that answers rubbish.
+function parseEqualizer(text) {
+  var absent = {
+    present: false, bands: [], frequencies: [], presets: [], preset: "",
+    preamp: 0, enabled: false, minimum: -12, maximum: 12
+  }
+  if (typeof text !== "string" || text.length > 262144) return absent
+  var props
+  try {
+    var d = JSON.parse(text)
+    if (!d || !Array.isArray(d.data) || !d.data[0] || typeof d.data[0] !== "object") return absent
+    props = d.data[0]
+  } catch (e) {
+    return absent
+  }
+  var entry = function(name) { return props[name] ? JSON.stringify(props[name]) : "" }
+  var bands = parseEqBands(entry("Bands"))
+  var frequencies = parseEqBands(entry("Frequencies"))
+  // A band without a frequency to label it, or the other way round, is not an
+  // equalizer anybody can draw.
+  if (bands.length === 0 || bands.length !== frequencies.length) return absent
+  var minimum = props.MinimumGain ? parseEqNumber(entry("MinimumGain")) : -12
+  var maximum = props.MaximumGain ? parseEqNumber(entry("MaximumGain")) : 12
+  if (!(maximum > minimum)) { minimum = -12; maximum = 12 }
+  return {
+    present: true,
+    bands: bands,
+    frequencies: frequencies,
+    presets: parseEqStrings(entry("Presets")),
+    preset: parseEqString(entry("Preset")),
+    preamp: parseEqNumber(entry("Preamp")),
+    enabled: parseEqBool(entry("Enabled")),
+    minimum: minimum,
+    maximum: maximum
+  }
+}
+
+function clampGain(db, minimum, maximum) {
+  var n = Number(db)
+  if (!isFinite(n)) return 0
+  return Math.max(minimum, Math.min(maximum, n))
+}
+
+// The bands with one of them moved, for sending back as a whole: the property
+// is the whole row, so a single slider still writes all ten.
+function bandsWith(bands, index, db, minimum, maximum) {
+  var list = Array.isArray(bands) ? bands.slice() : []
+  if (!(index >= 0 && index < list.length)) return []
+  list[index] = clampGain(db, minimum, maximum)
+  return list
+}
+
+// How a band reads beside its slider: one decimal, signed, and a plain 0 for
+// flat rather than "+0.0", which reads as a setting when it is the absence of
+// one.
+function gainLabel(db) {
+  var n = Number(db)
+  if (!isFinite(n)) return ""
+  if (Math.abs(n) < 0.05) return "0"
+  return (n > 0 ? "+" : "\u2212") + Math.abs(n).toFixed(1)
+}
+
+// 60 -> "60", 1000 -> "1k", 16000 -> "16k": the labels under the bands, which
+// have about three characters of room each.
+function bandLabel(hz) {
+  var n = Number(hz)
+  if (!isFinite(n) || n <= 0) return ""
+  if (n < 1000) return String(Math.round(n))
+  var k = n / 1000
+  return (k < 10 && Math.round(k) !== k ? k.toFixed(1) : String(Math.round(k))) + "k"
+}
+
+// The player this plugin is built around. It is what the library plays
+// through when nothing else has been chosen and it is installed; without it,
+// the desktop's own app for audio. A choice made in Settings always wins —
+// preferring archamp is a default, not an override.
+var PREFERRED_PLAYER = "archamp.desktop"
+
+// A choice made in Settings, then archamp if it is installed, then whatever
+// the desktop opens audio with — and if the desktop names nothing, the first
+// app that says it can. A stock Omarchy sets no audio handler at all, so that
+// last step is the difference between playing something and doing nothing.
+function defaultAudioApp(chosen, preferredInstalled, desktopDefault, apps) {
+  if (isDesktopId(chosen)) return chosen
+  if (preferredInstalled) return PREFERRED_PLAYER
+  if (isDesktopId(desktopDefault)) return desktopDefault
+  var installed = Array.isArray(apps) ? apps : []
+  for (var i = 0; i < installed.length; i++) {
+    if (isDesktopId(installed[i])) return installed[i]
+  }
+  return ""
+}
+
+// What the "no choice made" button says it will do, which depends on what is
+// actually there rather than on what it would like to be.
+function automaticAudioAppLabel(preferredInstalled, desktopDefault, apps) {
+  var id = defaultAudioApp("", preferredInstalled, desktopDefault, apps)
+  return id ? desktopIdLabel(id) : ""
+}
+
+// The audio types a music player is worth being the desktop's default for:
+// what the library plays, plus the playlist files that open one. xdg-mime
+// takes them all in one command.
+var AUDIO_MIME_TYPES = [
+  "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/flac", "audio/x-flac",
+  "audio/ogg", "audio/x-vorbis+ogg", "audio/opus", "audio/wav", "audio/x-wav",
+  "audio/aac", "audio/aiff", "audio/x-aiff", "audio/x-ms-wma",
+  "audio/x-mpegurl", "audio/x-scpls"
+]
+
+// The command that makes an app the desktop's default for audio, or [] for
+// anything that is not a desktop id — a bad setting must not become a command.
+function setDefaultAudioCommand(id) {
+  if (!isDesktopId(id)) return []
+  return ["xdg-mime", "default", id].concat(AUDIO_MIME_TYPES)
+}
+
+// Whether offering to is worth it: only for a player that has been chosen, and
+// only while it is not already the one the desktop opens audio with.
+function canBeDesktopDefault(chosen, current) {
+  return isDesktopId(chosen) && chosen !== current
 }
 
 function isDesktopId(value) {
@@ -425,6 +683,7 @@ function parsePreferences(text) {
   prefs.webArt = data.webArt !== false
   prefs.rememberStations = data.rememberStations !== false
   prefs.hideWhenIdle = data.hideWhenIdle === true
+  prefs.equalizerShown = data.equalizerShown === true
   prefs.seekStep = SEEK_STEPS.indexOf(data.seekStep) !== -1 ? data.seekStep : 5
   prefs.volumeStep = VOLUME_STEPS.indexOf(data.volumeStep) !== -1 ? data.volumeStep : 5
   prefs.titleWidth = TITLE_WIDTHS.indexOf(data.titleWidth) !== -1 ? data.titleWidth : 260
@@ -442,17 +701,28 @@ function serializePreferences(prefs) {
 }
 
 // The applications `gio mime audio/mpeg` recommends, as desktop file ids.
+// Every application that says it can open the type, not only the ones gio
+// recommends. The two lists are not the same: an app can register itself as a
+// handler without being recommended for it — archamp does exactly that — and
+// reading only the recommendations left installed players out of the picker
+// altogether. Recommended ones come first, since that is the desktop's own
+// order of preference; the rest follow.
 function parseGioMime(text) {
-  var ids = []
-  if (typeof text !== "string" || text.length > 65536) return ids
+  var recommended = [], registered = []
+  if (typeof text !== "string" || text.length > 65536) return []
   var lines = text.split(/\r?\n/)
-  var inRecommended = false
+  var into = null
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i]
-    if (/^Recommended applications:/.test(line)) { inRecommended = true; continue }
-    if (/^\S/.test(line)) { inRecommended = false; continue }
+    if (/^Recommended applications:/.test(line)) { into = recommended; continue }
+    if (/^Registered applications:/.test(line)) { into = registered; continue }
+    if (/^\S/.test(line)) { into = null; continue }
     var id = line.trim()
-    if (inRecommended && isDesktopId(id) && ids.indexOf(id) === -1) ids.push(id)
+    if (into && isDesktopId(id) && into.indexOf(id) === -1) into.push(id)
+  }
+  var ids = recommended.slice()
+  for (var j = 0; j < registered.length; j++) {
+    if (ids.indexOf(registered[j]) === -1) ids.push(registered[j])
   }
   return ids.slice(0, 20)
 }

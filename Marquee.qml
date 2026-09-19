@@ -35,7 +35,12 @@ Item {
     text: root.text
     color: root.color
     width: root.scrolling ? implicitWidth : root.width
-    elide: root.scrolling ? Text.ElideNone : Text.ElideRight
+    // Never both. Text that is allowed to scroll says the whole thing by
+    // scrolling, so an ellipsis on it would be a second, contradictory answer
+    // to the same question — and it shows up for real in the frame after a
+    // track change, before the new text has been measured and the glide has
+    // started. Only text that has been told not to move is cut short.
+    elide: root.running ? Text.ElideNone : Text.ElideRight
   }
 
   SequentialAnimation {

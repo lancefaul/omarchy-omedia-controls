@@ -274,6 +274,37 @@ TestCase {
     compare(Logic.parseVuFrame(undefined), { levels: [0, 0], peaks: [0, 0] })
   }
 
+  function test_a_frame_worth_freezing_is_one_with_a_picture_in_it() {
+    // Any of the three visualisations having something to say is enough: the
+    // analyser and the mirror read bands, the oscilloscope reads columns, the
+    // meter reads levels.
+    verify(Logic.visualiserFrameHasContent({ bands: [0.4], scopeColumns: [], vuLevels: [0, 0] }))
+    verify(Logic.visualiserFrameHasContent({ bands: [], scopeColumns: [{ top: 1, bottom: 2, row: 3 }], vuLevels: [0, 0] }))
+    verify(Logic.visualiserFrameHasContent({ bands: [], scopeColumns: [], vuLevels: [0, 0.3] }))
+  }
+
+  function test_an_empty_frame_is_never_put_away_over_a_good_one() {
+    // The capture is cleared for reasons that have nothing to do with the
+    // player — the popup closing, the visualiser switched off — and stashing
+    // that emptiness would lose the picture it was covering.
+    verify(!Logic.visualiserFrameHasContent({ bands: [], scopeColumns: [], vuLevels: [0, 0] }))
+    verify(!Logic.visualiserFrameHasContent({ bands: [], scopeColumns: [], vuLevels: [] }))
+    verify(!Logic.visualiserFrameHasContent({}))
+    verify(!Logic.visualiserFrameHasContent(null))
+    verify(!Logic.visualiserFrameHasContent(undefined))
+    // A silent meter is silence, not a picture.
+    verify(!Logic.visualiserFrameHasContent({ bands: [], scopeColumns: [], vuLevels: ["0.4", null] }))
+  }
+
+  function test_frozen_frames_outlive_a_pause_but_not_their_player() {
+    var frames = { brave: { bands: [1] }, archamp: { bands: [2] }, mpv: { bands: [3] } }
+    compare(Logic.keptFrames(frames, ["brave", "archamp"]), { brave: { bands: [1] }, archamp: { bands: [2] } })
+    compare(Logic.keptFrames(frames, []), {})
+    compare(Logic.keptFrames(frames, ["nobody"]), {})
+    compare(Logic.keptFrames(null, ["brave"]), {})
+    compare(Logic.keptFrames(frames, "brave"), {})
+  }
+
   function test_visualiser_gain_undoes_player_volume() {
     compare(Logic.visualiserGain(0.32, false), 1 / 0.32)
     compare(Logic.visualiserGain(0.5, true), 8)
@@ -342,12 +373,22 @@ TestCase {
     compare(bad.onlineLyrics, true)
   }
 
-  function test_gio_mime_recommended_apps() {
+  function test_gio_mime_finds_every_installed_player() {
     var out = "Default application for \u201caudio/mpeg\u201d: mpv-headless-audio.desktop\n"
       + "Registered applications:\n\tmpv.desktop\n\tmpv-headless-audio.desktop\n\torg.kde.kdenlive.desktop\n"
       + "Recommended applications:\n\tmpv.desktop\n\tmpv-headless-audio.desktop\n\tbad name.desktop\n"
-    compare(Logic.parseGioMime(out), ["mpv.desktop", "mpv-headless-audio.desktop"])
+    // Recommended first, in the desktop's own order, then everything else that
+    // registered itself — kdenlive is registered without being recommended,
+    // and leaving it out is how an installed player goes missing.
+    compare(Logic.parseGioMime(out), ["mpv.desktop", "mpv-headless-audio.desktop", "org.kde.kdenlive.desktop"])
+    // An app registered but never recommended still counts. This is archamp's
+    // own shape on a real machine.
+    var registeredOnly = "Registered applications:\n\tmpv.desktop\n\tarchamp.desktop\n"
+      + "Recommended applications:\n\tmpv.desktop\n"
+    compare(Logic.parseGioMime(registeredOnly), ["mpv.desktop", "archamp.desktop"])
     compare(Logic.parseGioMime(""), [])
+    // A name that is not a desktop id never reaches the picker.
+    verify(Logic.parseGioMime(out).indexOf("bad name.desktop") === -1)
   }
 
   function test_desktop_names() {
@@ -1370,5 +1411,327 @@ TestCase {
     compare(Logic.keyAction("escape"), "close")
     compare(Logic.keyAction("x"), "")
     compare(Logic.keyAction(undefined), "")
+  }
+
+  // Making the chosen player the desktop's default for audio. The command is
+  // built here rather than in the widget so a bad setting cannot become one.
+  function test_desktop_default_command() {
+    var command = Logic.setDefaultAudioCommand("archamp.desktop")
+    compare(command[0], "xdg-mime")
+    compare(command[1], "default")
+    compare(command[2], "archamp.desktop")
+    verify(command.indexOf("audio/mpeg") !== -1)
+    verify(command.indexOf("audio/flac") !== -1)
+    // Every argument after the id is a type, never a stray flag or a path.
+    for (var i = 3; i < command.length; i++) verify(/^audio\/[A-Za-z0-9.+-]+$/.test(command[i]))
+    compare(command.length, 3 + Logic.AUDIO_MIME_TYPES.length)
+  }
+
+  function test_desktop_default_refuses_anything_that_is_not_an_id() {
+    // Nothing here may reach a shell as an argument of its own.
+    var bad = ["", "archamp", "../evil.desktop", "a b.desktop", "-rf.desktop x",
+               "archamp.desktop;rm -rf ~", undefined, null, 7, {}]
+    for (var i = 0; i < bad.length; i++) {
+      compare(Logic.setDefaultAudioCommand(bad[i]).length, 0, "accepted " + bad[i])
+    }
+  }
+
+  function test_offering_it_only_when_there_is_something_to_change() {
+    // A player is chosen and is not the desktop's: worth offering.
+    verify(Logic.canBeDesktopDefault("archamp.desktop", "mpv.desktop"))
+    verify(Logic.canBeDesktopDefault("archamp.desktop", ""))
+    // Already the default, or nothing chosen: nothing to offer.
+    verify(!Logic.canBeDesktopDefault("archamp.desktop", "archamp.desktop"))
+    verify(!Logic.canBeDesktopDefault("", "mpv.desktop"))
+    verify(!Logic.canBeDesktopDefault("not-an-id", "mpv.desktop"))
+  }
+
+  // Helpers nothing tested directly, several of which guard input that comes
+  // from other applications or from a settings file.
+  function test_desktop_ids() {
+    verify(Logic.isDesktopId("archamp.desktop"))
+    verify(Logic.isDesktopId("org.kde.elisa.desktop"))
+    verify(Logic.isDesktopId("mpv-headless-audio.desktop"))
+    // A desktop id is a file name, never a path and never an argument.
+    verify(!Logic.isDesktopId("../archamp.desktop"))
+    verify(!Logic.isDesktopId("/usr/share/applications/mpv.desktop"))
+    verify(!Logic.isDesktopId("archamp.desktop extra"))
+    verify(!Logic.isDesktopId("archamp"))
+    verify(!Logic.isDesktopId(""))
+    verify(!Logic.isDesktopId(undefined))
+    verify(!Logic.isDesktopId(new Array(260).join("a") + ".desktop"))
+  }
+
+  function test_year_from_a_date() {
+    compare(Logic.yearOf("2010-07-27T00:00:00Z"), "2010")
+    compare(Logic.yearOf("1999"), "1999")
+    compare(Logic.yearOf(["2004-01-01"]), "2004")
+    compare(Logic.yearOf("not a date"), "")
+    compare(Logic.yearOf(""), "")
+    compare(Logic.yearOf(undefined), "")
+  }
+
+  function test_channel_labels() {
+    compare(Logic.channelsLabel(1), "mono")
+    compare(Logic.channelsLabel(2), "stereo")
+    compare(Logic.channelsLabel(6), "5.1")
+    compare(Logic.channelsLabel(8), "7.1")
+    compare(Logic.channelsLabel(4), "4 ch")
+    compare(Logic.channelsLabel(0), "")
+    compare(Logic.channelsLabel(999), "")
+  }
+
+  function test_rates() {
+    verify(Logic.rateInRange(1.5, 0.25, 4))
+    verify(Logic.rateInRange(0.25, 0.25, 4), "the ends of the range are in it")
+    verify(Logic.rateInRange(4, 0.25, 4))
+    verify(!Logic.rateInRange(5, 0.25, 4))
+    // A player that cannot change rate has no range to be in.
+    verify(!Logic.rateInRange(1, 1, 1))
+    verify(Logic.sameRate(1.0, 1.0))
+    verify(Logic.sameRate(1.0, 1.0000001), "floating point should not count as a change")
+    verify(!Logic.sameRate(1.0, 1.5))
+    verify(!Logic.sameRate("1", 1))
+    verify(!Logic.sameRate(undefined, 1))
+  }
+
+  function test_small_helpers() {
+    compare(Logic.positiveInt("12"), 12)
+    compare(Logic.positiveInt(3.6), 4)
+    compare(Logic.positiveInt(0), 0)
+    compare(Logic.positiveInt(-5), 0)
+    compare(Logic.positiveInt("nonsense"), 0)
+    compare(Logic.positiveInt(undefined), 0)
+
+    compare(Logic.firstText(["  a  ", "b"]), "a")
+    compare(Logic.firstText([]), "")
+    compare(Logic.firstText("  spaced  "), "spaced")
+    compare(Logic.firstText(null), "")
+    compare(Logic.firstText(7), "7")
+
+    // Chromium names a web app's window with a double underscore.
+    verify(Logic.isWebAppWindow("brave-abcdef__Default"))
+    verify(!Logic.isWebAppWindow("brave-browser"))
+    verify(!Logic.isWebAppWindow(""))
+    verify(!Logic.isWebAppWindow(undefined))
+  }
+
+  function test_preference_defaults_are_whole() {
+    var d = Logic.preferenceDefaults()
+    verify(d !== undefined && d !== null)
+    // Every default must survive its own parser, or a fresh install differs
+    // from a saved one.
+    var round = Logic.parsePreferences(JSON.stringify(d))
+    var keys = Object.keys(d)
+    verify(keys.length > 0)
+    for (var i = 0; i < keys.length; i++) {
+      compare(JSON.stringify(round[keys[i]]), JSON.stringify(d[keys[i]]), "default changed by parsing: " + keys[i])
+    }
+  }
+
+  // Pulling a channel out of a #rrggbb colour, which the visualiser does for
+  // every bar it draws.
+  function test_hex_channels() {
+    compare(Logic.hexChannel("#ff8000", 0), 255)
+    compare(Logic.hexChannel("#ff8000", 1), 128)
+    compare(Logic.hexChannel("#ff8000", 2), 0)
+    compare(Logic.hexChannel("#000000", 0), 0)
+    verify(isNaN(Logic.hexChannel("", 0)))
+  }
+
+  // Which app the library plays through: a choice always wins, then archamp if
+  // it is installed, then whatever the desktop opens audio with.
+  function test_default_audio_app() {
+    compare(Logic.defaultAudioApp("", true, "mpv.desktop"), "archamp.desktop")
+    compare(Logic.defaultAudioApp("", false, "mpv.desktop"), "mpv.desktop")
+    // A choice made in Settings is never overridden by the preference.
+    compare(Logic.defaultAudioApp("mpv.desktop", true, "vlc.desktop"), "mpv.desktop")
+    compare(Logic.defaultAudioApp("vlc.desktop", false, "mpv.desktop"), "vlc.desktop")
+    // Nothing chosen, archamp absent, no desktop default: the first app that
+    // says it can play. A stock Omarchy names no audio handler at all, so
+    // without this step the library would have nothing to play through.
+    compare(Logic.defaultAudioApp("", false, "", ["mpv.desktop", "vlc.desktop"]), "mpv.desktop")
+    compare(Logic.defaultAudioApp("", false, "", ["not an id", "vlc.desktop"]), "vlc.desktop")
+    // And when there is genuinely nothing installed, nothing.
+    compare(Logic.defaultAudioApp("", false, "", []), "")
+    compare(Logic.defaultAudioApp("", false, ""), "")
+    // A settings file with rubbish in it is not a choice.
+    compare(Logic.defaultAudioApp("../evil.desktop", true, "mpv.desktop"), "archamp.desktop")
+    compare(Logic.defaultAudioApp("../evil.desktop", false, "mpv.desktop"), "mpv.desktop")
+    compare(Logic.defaultAudioApp("", false, "../evil.desktop"), "")
+  }
+
+  function test_automatic_label_says_what_will_happen() {
+    compare(Logic.automaticAudioAppLabel(true, "mpv.desktop"), "archamp")
+    compare(Logic.automaticAudioAppLabel(false, "mpv-headless-audio.desktop"), "mpv-headless-audio")
+    compare(Logic.automaticAudioAppLabel(false, "", ["mpv.desktop"]), "mpv")
+    compare(Logic.automaticAudioAppLabel(false, ""), "")
+  }
+
+  // ------------------------------------------------------------ equalizer
+  // Everything here reads what another application said over the bus, so the
+  // shapes that matter are the ones a player has no business sending.
+  function test_equalizer_bands_are_read_or_refused() {
+    compare(Logic.parseEqBands('{"type":"ad","data":[4.8,-3.6,0]}'), [4.8, -3.6, 0])
+    compare(Logic.parseEqBands('{"type":"ad","data":[]}'), [])
+    // A player answering with the wrong type draws no bands at all.
+    compare(Logic.parseEqBands('{"type":"as","data":["nope"]}'), [])
+    compare(Logic.parseEqBands('{"type":"ad","data":"nope"}'), [])
+    compare(Logic.parseEqBands("not json"), [])
+    compare(Logic.parseEqBands(""), [])
+    compare(Logic.parseEqBands(undefined), [])
+    // Values that are not numbers are dropped rather than drawn as NaN.
+    compare(Logic.parseEqBands('{"type":"ad","data":[1,null,"x",2]}'), [1, 2])
+  }
+
+  function test_equalizer_scalars() {
+    compare(Logic.parseEqNumber('{"type":"d","data":-12}'), -12)
+    compare(Logic.parseEqNumber('{"type":"d","data":"x"}'), 0)
+    compare(Logic.parseEqNumber("rubbish"), 0)
+    verify(Logic.parseEqBool('{"type":"b","data":true}'))
+    verify(!Logic.parseEqBool('{"type":"b","data":false}'))
+    verify(!Logic.parseEqBool('{"type":"b","data":"true"}'))
+    verify(!Logic.parseEqBool(""))
+    compare(Logic.parseEqString('{"type":"s","data":"Rock"}'), "Rock")
+    compare(Logic.parseEqString('{"type":"s","data":""}'), "")
+    compare(Logic.parseEqString('{"type":"s","data":7}'), "")
+    // Control characters from another application never reach a label.
+    compare(Logic.parseEqString('{"type":"s","data":"Ro\\u0007ck"}'), "Rock")
+    // A raw control character is not valid JSON, so there is nothing to read.
+    compare(Logic.parseEqString('{"type":"s","data":"Ro\u0007ck"}'), "")
+  }
+
+  function test_equalizer_preset_names() {
+    compare(Logic.parseEqStrings('{"type":"as","data":["Rock","Techno"]}'), ["Rock", "Techno"])
+    compare(Logic.parseEqStrings('{"type":"ad","data":[1]}'), [])
+    compare(Logic.parseEqStrings('{"type":"as","data":["ok",7,null]}'), ["ok"])
+    compare(Logic.parseEqStrings("["), [])
+  }
+
+  function test_equalizer_labels() {
+    compare(Logic.gainLabel(4.8), "+4.8")
+    compare(Logic.gainLabel(-3.6), "\u22123.6")
+    // Flat is 0, not "+0.0", which would read as a setting.
+    compare(Logic.gainLabel(0), "0")
+    compare(Logic.gainLabel(0.01), "0")
+    compare(Logic.gainLabel("nonsense"), "")
+
+    compare(Logic.bandLabel(60), "60")
+    compare(Logic.bandLabel(310), "310")
+    compare(Logic.bandLabel(1000), "1k")
+    compare(Logic.bandLabel(2500), "2.5k")
+    compare(Logic.bandLabel(16000), "16k")
+    compare(Logic.bandLabel(0), "")
+    compare(Logic.bandLabel(undefined), "")
+  }
+
+  // One GetAll, as busctl prints it. A player that has no equalizer, or one
+  // that answers something unusable, must draw nothing rather than half a row.
+  function test_equalizer_get_all() {
+    var real = '{"type":"a{sv}","data":[{'
+      + '"Enabled":{"type":"b","data":true},'
+      + '"Preamp":{"type":"d","data":0},'
+      + '"Bands":{"type":"ad","data":[4.8,2.9,-3.6]},'
+      + '"Frequencies":{"type":"ad","data":[60,170,310]},'
+      + '"MinimumGain":{"type":"d","data":-12},'
+      + '"MaximumGain":{"type":"d","data":12},'
+      + '"Presets":{"type":"as","data":["Rock","Techno"]},'
+      + '"Preset":{"type":"s","data":"Rock"}}]}'
+    var eq = Logic.parseEqualizer(real)
+    verify(eq.present)
+    compare(eq.bands, [4.8, 2.9, -3.6])
+    compare(eq.frequencies, [60, 170, 310])
+    compare(eq.preset, "Rock")
+    compare(eq.presets, ["Rock", "Techno"])
+    compare(eq.minimum, -12)
+    compare(eq.maximum, 12)
+    verify(eq.enabled)
+
+    // A player without the interface: busctl fails with nothing on stdout.
+    verify(!Logic.parseEqualizer("").present)
+    verify(!Logic.parseEqualizer("not json").present)
+    verify(!Logic.parseEqualizer('{"type":"a{sv}","data":[]}').present)
+    // Bands with no frequencies to label them is not something to draw.
+    verify(!Logic.parseEqualizer('{"type":"a{sv}","data":[{"Bands":{"type":"ad","data":[1,2]}}]}').present)
+    // Nor a mismatched pair.
+    var mismatched = '{"type":"a{sv}","data":[{"Bands":{"type":"ad","data":[1,2]},'
+      + '"Frequencies":{"type":"ad","data":[60]}}]}'
+    verify(!Logic.parseEqualizer(mismatched).present)
+    // A nonsense range falls back to Winamp's own rather than dividing by it.
+    var badRange = '{"type":"a{sv}","data":[{"Bands":{"type":"ad","data":[1]},'
+      + '"Frequencies":{"type":"ad","data":[60]},'
+      + '"MinimumGain":{"type":"d","data":5},"MaximumGain":{"type":"d","data":5}}]}'
+    compare(Logic.parseEqualizer(badRange).minimum, -12)
+    compare(Logic.parseEqualizer(badRange).maximum, 12)
+  }
+
+  function test_moving_one_band_sends_them_all() {
+    var bands = [0, 0, 0]
+    compare(Logic.bandsWith(bands, 1, 6, -12, 12), [0, 6, 0])
+    // Out of range is clamped, not refused.
+    compare(Logic.bandsWith(bands, 0, 99, -12, 12), [12, 0, 0])
+    compare(Logic.bandsWith(bands, 0, -99, -12, 12), [-12, 0, 0])
+    // A band that is not there changes nothing at all.
+    compare(Logic.bandsWith(bands, 7, 6, -12, 12), [])
+    compare(Logic.bandsWith(bands, -1, 6, -12, 12), [])
+    compare(Logic.bandsWith([], 0, 6, -12, 12), [])
+    compare(Logic.clampGain("nonsense", -12, 12), 0)
+  }
+
+  // busctl reads a leading "-" as an option, and an equalizer is half negative
+  // by definition: without the "--" every cut is refused and the whole write
+  // fails, silently, leaving the sliders showing something the player is not.
+  function test_busctl_commands_pass_negatives() {
+    var set = Logic.busctlCommand("set-property", ["bus", "/path", "iface", "Bands", "ad", "2", "-3.6", "4.8"])
+    compare(set[0], "busctl")
+    compare(set[1], "--user")
+    compare(set[2], "--")
+    compare(set[3], "set-property")
+    // Everything after the separator, negatives included, is an argument.
+    verify(set.indexOf("-3.6") > set.indexOf("--"))
+    compare(set[set.length - 1], "4.8")
+
+    var read = Logic.busctlJsonCommand("call", ["bus", "/path"])
+    compare(read.slice(0, 4), ["busctl", "--user", "--json=short", "--"])
+    compare(read[4], "call")
+
+    // No arguments is still a valid command, not an undefined tail.
+    compare(Logic.busctlCommand("call", []).length, 4)
+    compare(Logic.busctlCommand("call").length, 4)
+  }
+
+  // Where a preset is saved, from the file chooser's answer.
+  function test_preset_file_path() {
+    compare(Logic.presetFilePath("/home/me/rock.eqf\n"), "/home/me/rock.eqf")
+    compare(Logic.presetFilePath("/home/me/rock.Q1"), "/home/me/rock.Q1")
+    // archamp refuses anything that is not a preset file, so a bare name is
+    // completed rather than sent to be turned down.
+    compare(Logic.presetFilePath("/home/me/rock"), "/home/me/rock.eqf")
+    compare(Logic.presetFilePath("/home/me/my mix"), "/home/me/my mix.eqf")
+    // Cancelled, or an answer that is not a path at all.
+    compare(Logic.presetFilePath(""), "")
+    compare(Logic.presetFilePath("rock.eqf"), "")
+    compare(Logic.presetFilePath(undefined), "")
+  }
+
+  // Whether the bands are on screen is remembered, like every other choice in
+  // the popup, and separately from whether the equalizer is switched on.
+  function test_equalizer_shown_is_remembered() {
+    compare(Logic.preferenceDefaults().equalizerShown, false)
+    compare(Logic.parsePreferences('{"version":1,"equalizerShown":true}').equalizerShown, true)
+    compare(Logic.parsePreferences('{"version":1,"equalizerShown":"yes"}').equalizerShown, false)
+    compare(Logic.parsePreferences('{"version":1}').equalizerShown, false)
+    // And it survives being written and read back.
+    var round = Logic.parsePreferences(Logic.serializePreferences({ equalizerShown: true }))
+    compare(round.equalizerShown, true)
+  }
+
+  // Saving is for a shape that is not already a preset.
+  function test_saving_only_what_is_not_a_preset_already() {
+    verify(Logic.canSavePreset(""))
+    verify(Logic.canSavePreset("   "))
+    verify(Logic.canSavePreset(undefined))
+    verify(!Logic.canSavePreset("Rock"))
+    verify(!Logic.canSavePreset("Full Bass & Treble"))
   }
 }

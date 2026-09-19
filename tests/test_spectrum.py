@@ -299,5 +299,110 @@ class OutputFormatTest(unittest.TestCase):
         self.assertEqual(spectrum.js_round(-0.5), 0)
 
 
+class FramesTest(unittest.TestCase):
+    """What one hop of audio turns into in each mode.
+
+    The widget runs --all and lets the viewer switch between visualisations
+    without restarting the capture, which only works if every mode is measured
+    from every hop.
+    """
+
+    def stereo_hop(self, left=0.5, right=0.25):
+        """One hop of interleaved stereo: a tone in each channel, the right
+        quieter, so a downmix is distinguishable from either channel alone."""
+        t = np.arange(spectrum.HOP) / spectrum.RATE
+        l = left * np.sin(2 * math.pi * 1000.0 * t)
+        r = right * np.sin(2 * math.pi * 1000.0 * t)
+        return np.column_stack([l, r]).reshape(-1)
+
+    def mono_hop(self, amplitude=0.5):
+        t = np.arange(spectrum.HOP) / spectrum.RATE
+        return amplitude * np.sin(2 * math.pi * 1000.0 * t)
+
+    def test_default_is_the_analyser_alone(self):
+        frames = spectrum.Frames()
+        self.assertEqual(frames.channels, 1)
+        lines = frames.step(self.mono_hop())
+        self.assertEqual(len(lines), 1)
+        self.assertFalse(lines[0].startswith(("v|", "o|")))
+
+    def test_vu_is_the_meter_alone_in_stereo(self):
+        frames = spectrum.Frames(vu=True)
+        self.assertEqual(frames.channels, 2)
+        lines = frames.step(self.stereo_hop())
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("v|"))
+
+    def test_oscilloscope_is_the_scope_alone(self):
+        frames = spectrum.Frames(oscilloscope=True)
+        self.assertEqual(frames.channels, 1)
+        lines = frames.step(self.mono_hop())
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("o|"))
+
+    def test_all_gives_every_visualisation_one_line_each(self):
+        frames = spectrum.Frames(every=True)
+        self.assertEqual(frames.channels, 2)
+        lines = frames.step(self.stereo_hop())
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].startswith("v|"))
+        self.assertTrue(lines[1].startswith("o|"))
+        self.assertFalse(lines[2].startswith(("v|", "o|")))
+
+    def test_all_measures_the_meter_per_channel(self):
+        """The downmix is for the analyser and the scope. A meter that read it
+        would show the same number on both channels."""
+        frames = spectrum.Frames(every=True)
+        line = frames.step(self.stereo_hop(0.5, 0.05))[0]
+        left, right = [float(v) for v in line.split("|")[1].split(",")]
+        self.assertGreater(left, right)
+
+    def test_all_feeds_the_analyser_the_downmix(self):
+        """Not one channel, and not the interleaved pair read as a waveform —
+        either would put the analyser somewhere other than where a mono capture
+        of the same audio would."""
+        every = spectrum.Frames(every=True)
+        mono = spectrum.Frames()
+        for _ in range(4):
+            both = every.step(self.stereo_hop(0.5, 0.5))
+            alone = mono.step(self.mono_hop(0.5))
+        self.assertEqual(both[2], alone[0])
+
+    def test_all_keeps_running_ballistics_for_a_visualisation_nobody_is_watching(self):
+        """The point of --all: the meter's fall is a fall from where it was, so
+        switching to it mid-track finds it where it should be, not at zero."""
+        frames = spectrum.Frames(every=True)
+        frames.step(self.stereo_hop(0.9, 0.9))
+        loud = float(frames.step(self.stereo_hop(0.9, 0.9))[0].split("|")[1].split(",")[0])
+        for _ in range(3):
+            frames.step(self.stereo_hop(0.0, 0.0))
+        quiet = float(frames.step(self.stereo_hop(0.0, 0.0))[0].split("|")[1].split(",")[0])
+        self.assertGreater(loud, 0.5)
+        self.assertLess(quiet, loud)
+        self.assertGreater(quiet, 0.0)
+
+    def test_emit_writes_a_whole_frame_at_once(self):
+        written = []
+
+        class Stdout:
+            def write(self, text):
+                written.append(text)
+
+            def flush(self):
+                pass
+
+        original = spectrum.sys.stdout
+        spectrum.sys.stdout = Stdout()
+        try:
+            spectrum.emit(["v|1", "o|2", "3"])
+        finally:
+            spectrum.sys.stdout = original
+        self.assertEqual(written, ["v|1\no|2\n3\n"])
+
+    def test_modes_are_exclusive(self):
+        with self.assertRaises(SystemExit):
+            spectrum.parse_args(["--vu", "--all"])
+
+
 if __name__ == "__main__":
     unittest.main()

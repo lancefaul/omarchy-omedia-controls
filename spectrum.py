@@ -39,6 +39,14 @@ peak for each, 0.0-1.0 on a -30 dB to 0 dB scale:
 
     v|0.720,0.655|0.810,0.790
 
+With --all it is all three, three lines a frame, measured from the same audio:
+the VU line, then the oscilloscope line, then the analyser line. A client that
+lets the viewer switch between them wants this one — each visualisation has
+ballistics that only make sense if it has been running all along, so measuring
+only the one on screen means the others start from nothing, and a picture
+frozen on pause is frozen for whichever one the viewer was watching and blank
+for the rest.
+
 Winamp draws from the decoded audio, before its own volume control, so its
 visualiser doesn't change with the volume. What is captured here is after the
 player's own volume, so the widget sends the inverse of it on stdin, one line
@@ -395,7 +403,73 @@ def parse_args(argv):
                       help="draw Winamp's oscilloscope instead of the spectrum analyser")
     mode.add_argument("--vu", action="store_true",
                       help="measure a stereo VU meter instead of the spectrum analyser")
+    mode.add_argument("--all", action="store_true",
+                      help="emit all three — analyser, oscilloscope and VU — one line each per "
+                           "frame, so a client can switch between them without missing a beat")
     return parser.parse_args(argv)
+
+
+class Frames:
+    """Everything one capture is turned into, and the state that turning it
+    takes: the analyser's falling bars and hanging peaks, the meter's
+    ballistics, and the sliding window the analyser and the scope read.
+
+    `step` takes one hop of audio — interleaved stereo when the meter is in
+    play, mono otherwise — and returns the lines that hop produces, in the
+    order a client reads them."""
+
+    def __init__(self, vu=False, oscilloscope=False, every=False):
+        # The three modes are exclusive; --all is all of them at once.
+        self.vu = every or vu
+        self.oscilloscope = every or oscilloscope
+        self.analyser_on = every or not (vu or oscilloscope)
+        # Only the meter has anything to say about the two channels apart.
+        self.stereo = self.vu
+        self.analyser = Analyser()
+        self.meter = VuMeter()
+        self.window = np.zeros(FFT_SIZE, dtype=np.float64)
+
+    @property
+    def channels(self):
+        return 2 if self.stereo else 1
+
+    def step(self, hop):
+        lines = []
+
+        if self.vu:
+            # Interleaved left, right.
+            left, right = hop[0::2], hop[1::2]
+            levels, peaks = self.meter.step([left, right])
+            lines.append(format_vu(levels, peaks))
+            # What the analyser and the scope see is the pair mixed down,
+            # which is what a mono capture would have handed us anyway.
+            hop = (left + right) / 2.0
+
+        if not self.oscilloscope and not self.analyser_on:
+            return lines
+
+        self.window = np.roll(self.window, -HOP)
+        self.window[-HOP:] = hop
+
+        if self.oscilloscope:
+            # The newest audio, unscaled: Webamp's scope reads the raw
+            # time-domain bytes rather than the analyser's gained input.
+            lines.append(format_scope(scope_columns(self.window[-SCOPE_SAMPLES:])))
+        if self.analyser_on:
+            bars, peaks = self.analyser.step(columns_from(nullsoft_spectrum(self.window * INPUT_GAIN)))
+            lines.append(format_frame(bars, peaks))
+        return lines
+
+
+def emit(lines):
+    """One frame's worth of output. A frame may be several lines — in --all
+    mode every visualisation is measured from the same audio — and they go out
+    together so a client never sees half a frame."""
+    try:
+        sys.stdout.write("".join(line + "\n" for line in lines))
+        sys.stdout.flush()
+    except BrokenPipeError:
+        cleanup()
 
 
 def main():
@@ -404,11 +478,10 @@ def main():
     signal.signal(signal.SIGTERM, cleanup)
 
     args = parse_args(sys.argv[1:])
-    analyser = Analyser()
-    meter = VuMeter()
-    window = np.zeros(FFT_SIZE, dtype=np.float64)
-    # The VU meter needs both channels; the analyser and scope are mono.
-    channels = 2 if args.vu else 1
+    frames = Frames(vu=args.vu, oscilloscope=args.oscilloscope, every=args.all)
+    # The VU meter needs both channels; the analyser and scope are mono, and in
+    # --all mode they take the downmix of the pair.
+    channels = frames.channels
     hop_bytes = HOP * 2 * channels
     pending = bytearray()
 
@@ -466,33 +539,7 @@ def main():
             hop = np.frombuffer(bytes(pending[:hop_bytes]), dtype=np.int16).astype(np.float64) / 32768.0 * gain
             del pending[:hop_bytes]
 
-            if args.vu:
-                # Interleaved left, right.
-                levels, peaks = meter.step([hop[0::2], hop[1::2]])
-                line = format_vu(levels, peaks)
-                try:
-                    sys.stdout.write(line + "\n")
-                    sys.stdout.flush()
-                except BrokenPipeError:
-                    cleanup()
-                continue
-
-            window = np.roll(window, -HOP)
-            window[-HOP:] = hop
-
-            if args.oscilloscope:
-                # The newest audio, unscaled: Webamp's scope reads the raw
-                # time-domain bytes rather than the analyser's gained input.
-                line = format_scope(scope_columns(window[-SCOPE_SAMPLES:]))
-            else:
-                bars, peaks = analyser.step(columns_from(nullsoft_spectrum(window * INPUT_GAIN)))
-                line = format_frame(bars, peaks)
-
-            try:
-                sys.stdout.write(line + "\n")
-                sys.stdout.flush()
-            except BrokenPipeError:
-                cleanup()
+            emit(frames.step(hop))
 
 
 if __name__ == "__main__":

@@ -15,6 +15,35 @@ It binds MPRIS directly rather than going through the built-in `omarchy.media`
 service, whose service half only runs while that plugin's own bar icon is
 enabled — this widget replaces that icon, so it cannot depend on it.
 
+## OMedia Controls and archamp are one thing in two halves
+
+These controls work with any MPRIS player — a browser tab, mpv, Spotify,
+whatever you already run — and that is the point of them. But they were built
+alongside a player of their own,
+[archamp](https://github.com/lancefaul/archamp): a real Winamp as a native
+desktop app. Each is better for the other, and together they do things this
+plugin cannot do with anything else:
+
+- **The equalizer in the bar.** MPRIS has no equalizer, so there is nothing to
+  read from most players. archamp publishes `org.archamp.Equalizer`, and the
+  EQUALIZER section appears in the popup with ten bands, a preamp and the
+  presets — the same equalizer, from either end, in step.
+- **A player with no window.** Settings → Music player can keep archamp's
+  window hidden, and these controls become the whole interface: the music, the
+  media keys and the library all carry on with nothing on screen.
+- **One playlist, two ways in.** Both read and write M3U files in the same
+  Playlists folder, and archamp follows the setting here for where that folder
+  is, so a list built in either shows up in the other.
+- **Reordering, from the bar.** MPRIS has no way to move a track; archamp's
+  own `MoveTrack` gives the playlist column one.
+- **Everything else, done exactly.** Sample-exact seeking rather than a fixed
+  skip, a named playlist, album/year/track read from the files themselves,
+  speed from 0.25x to 4x, and all three repeat positions.
+
+Library → Music player is set to Automatic, which means archamp when it is
+installed and your desktop's own audio app when it is not. Nothing here needs
+archamp; it is just what these controls reach for first.
+
 ## What it does
 
 - **In the bar:** album art and the track title, capped at a width you choose
@@ -64,6 +93,11 @@ enabled — this widget replaces that icon, so it cannot depend on it.
   next, scroll to change track. Clicking the popup's album art raises the
   player's own window, when the player supports it.
 - **Playlists**, saved as M3U files — see below.
+- **Equalizer**, for a player that has one to offer: ten bands and a preamp,
+  the presets, and on/off. archamp does; MPRIS itself has no equalizer, so
+  this appears only for players that expose one.
+- **Open the player**: each row in PLAYERS has a button that brings that
+  player's own window up, for the players that have one to bring.
 - **Updates:** when a newer release is out, an *Update available* button
   above Now Playing opens its release notes and the exact command Update
   runs (Omarchy's own `omarchy plugin update`), with Update, Dismiss, and a
@@ -163,12 +197,19 @@ next one; the popup remembers which you chose:
    brightest near the middle, as Webamp draws it.
 6. **Off**, an empty corner, and no audio captured. Click it for the analyser.
 
+All five are measured from the same capture, whichever one is on screen. Each
+has ballistics that only mean anything if it has been running all along — bars
+that fall, peaks that hang, a meter that empties over half a second — so
+switching between them is instant rather than starting from nothing, and the
+picture left frozen when you pause is frozen for all five.
+
 ## Cost while idle
 
 The visualiser's audio capture and the position probe only run while the popup
 is open **and** something is playing. Nothing polls in the background, and the
 `parec` monitor stream is not held open the rest of the time. While running,
-the analyser takes about 1% of a CPU core at 60 frames a second. The popup's
+all five visualisations together take a little over 1% of a CPU core at 60
+frames a second (measured here at 1.1%, against 0.7% for the analyser alone). The popup's
 long lines scroll only while it is open; the bar's title scrolls when it is
 too long for its width and a track is loaded, which Settings can turn off.
 
@@ -375,14 +416,22 @@ player:
 - **Updates**: the installed and latest versions, Check now, View update, and
   whether to check daily (on).
 - **Library**: the music folder (the desktop's, or one you choose), and the
-  app that plays picks the active player can't take (the desktop's, or one of
-  the apps it recommends for audio).
+  app that plays picks the active player can't take. Left on Automatic that is
+  [archamp](https://github.com/lancefaul/archamp), which these controls are
+  built around, or your desktop's own audio app when archamp isn't installed;
+  you can also pick any app the desktop recommends for audio, and offer to
+  make it the default for the whole desktop.
 - **Playlist folder**: where saved playlists are kept (Playlists inside the
   music folder, or one you choose).
 - **Privacy**: look up lyrics online (on), load cover art from the web (on),
   remember live stations (on), and buttons to forget remembered stations and
   clear cached lyrics. With the first two off, the plugin makes no network
   requests at all.
+- **Music player**: which app plays picks the active player can't take, and —
+  for a player that can hide its own window, which archamp can — whether to
+  keep that player's window hidden. Hidden, it keeps playing with no window at
+  all: these controls, the media keys and the library all carry on, and
+  opening the player from PLAYERS brings the window back for now.
 - **Behaviour**: hide the widget when nothing is playing (off; it returns as
   soon as a player has a track), pause other players when one starts (off;
   also switchable from the PLAYERS header), and how wide the title in the bar
