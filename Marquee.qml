@@ -18,11 +18,27 @@ Item {
   // a running time, keeps scrolling instead, or it would never get past the
   // start.
   property bool restartOnTextChange: true
+  // Held still (running false), scroll while the pointer is over it, so the
+  // whole text can still be read. Off by default: the bar's own title area
+  // handles its pointer itself.
+  property bool scrollOnHover: false
 
   // The width the text wants, for callers that size to it.
   readonly property real contentWidth: label.implicitWidth
   readonly property bool overflowing: label.implicitWidth > width + 1
-  readonly property bool scrolling: running && overflowing && visible
+  readonly property bool scrolling: (running || hoverArea.containsMouse) && overflowing && visible
+
+  // The whole text for a screen reader, whatever is on screen.
+  Accessible.role: Accessible.StaticText
+  Accessible.name: text
+
+  MouseArea {
+    id: hoverArea
+    anchors.fill: parent
+    enabled: root.scrollOnHover
+    hoverEnabled: true
+    acceptedButtons: Qt.NoButton
+  }
 
   implicitWidth: label.implicitWidth
   implicitHeight: label.implicitHeight
@@ -40,7 +56,7 @@ Item {
     // to the same question — and it shows up for real in the frame after a
     // track change, before the new text has been measured and the glide has
     // started. Only text that has been told not to move is cut short.
-    elide: root.running ? Text.ElideNone : Text.ElideRight
+    elide: root.running || hoverArea.containsMouse ? Text.ElideNone : Text.ElideRight
   }
 
   SequentialAnimation {

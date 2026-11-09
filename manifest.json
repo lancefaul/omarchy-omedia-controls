@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "lancefaul.omedia-controls",
   "name": "OMedia Controls",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "author": "lancefaul",
   "license": "MIT",
   "description": "Media controls for any MPRIS player: album art, a seek bar, playback controls with shuffle and repeat, playlists you can build and save, synced lyrics, a music library, speed, volume, an equalizer for the players that have one, live streams and video, and Winamp's classic visualizers, from the spectrum analyzer to the oscilloscope, styled like Omarchy's own panels, with every setting in the popup.",

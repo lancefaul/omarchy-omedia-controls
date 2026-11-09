@@ -195,6 +195,9 @@ TestCase {
     compare(d.titleWidth, 260)
     compare(d.scrollTitle, true)
     compare(Logic.parsePreferences('{"version":1,"scrollTitle":false}').scrollTitle, false)
+    // The popup's moving text can be held still (audit #3); on by default.
+    compare(d.popupMotion, true)
+    compare(Logic.parsePreferences('{"version":1,"popupMotion":false}').popupMotion, false)
     compare(d.settingsMigrated, false)
     var m = Logic.migrateSettings(d, { hideWhenIdle: true, pauseOthers: true, maxLabelWidth: 200, visualizerEnabled: false })
     compare(m.hideWhenIdle, true)
@@ -1253,6 +1256,13 @@ TestCase {
     compare(Logic.streamScore(brave, "mpv", "x"), 0)
     compare(Logic.streamScore({}, "mpv", "x"), 0)
     compare(Logic.streamScore(null, "mpv", "x"), 0)
+    // An embedded player under its app's name: matched by its bus name.
+    var archamp = { "application.name": "archamp", "media.name": "Playback" }
+    compare(Logic.streamScore(archamp, "MyApp", "Danger Line", "org.mpris.MediaPlayer2.archamp.myapp"), 1)
+    compare(Logic.streamScore(archamp, "MyApp", "x", "org.mpris.MediaPlayer2.mpv"), 0)
+    compare(Logic.streamScore(brave, "MyApp", "x", "org.mpris.MediaPlayer2.archamp.myapp"), 0)
+    compare(Logic.busPlayer("org.mpris.MediaPlayer2.chromium.instance42"), "chromium")
+    compare(Logic.busPlayer("nonsense"), "")
   }
 
   // ------------------------------------------------------------- metadata
@@ -1733,5 +1743,24 @@ TestCase {
     verify(Logic.canSavePreset(undefined))
     verify(!Logic.canSavePreset("Rock"))
     verify(!Logic.canSavePreset("Full Bass & Treble"))
+  }
+
+  // A development checkout must never run omarchy's updater (audit #7).
+  function test_only_the_public_repo_counts_as_an_install() {
+    verify(Logic.isPublicRemote("https://github.com/lancefaul/omarchy-omedia-controls.git\n"))
+    verify(Logic.isPublicRemote("https://github.com/lancefaul/omarchy-omedia-controls"))
+    verify(Logic.isPublicRemote("git@github.com:lancefaul/omarchy-omedia-controls.git"))
+    verify(!Logic.isPublicRemote("https://github.com/lancefaul/omedia-controls.git"))
+    verify(!Logic.isPublicRemote("https://github.com/lancefaul/omarchy-omedia-controls-fork.git"))
+    verify(!Logic.isPublicRemote(""))
+    // git clone takes these too
+    verify(Logic.isPublicRemote("https://github.com/lancefaul/omarchy-omedia-controls/"))
+    verify(Logic.isPublicRemote("https://github.com/LanceFaul/omarchy-omedia-controls.git"))
+  }
+
+  // A failure says what to do, not the command's raw output (audit #6).
+  function test_a_failed_update_names_the_way_forward() {
+    verify(Logic.UPDATE_FAILED.indexOf("omarchy plugin update lancefaul.omedia-controls") !== -1)
+    verify(Logic.UPDATE_FAILED.indexOf("--yes") === -1)
   }
 }

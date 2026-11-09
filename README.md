@@ -141,6 +141,11 @@ unless you choose another in Settings, so any player can open them.
 | `r` | Repeat: off, all, one |
 | `[` / `]` | Slower / faster |
 | `l` | Go live |
+| `e` | Show or hide the equalizer |
+| `/` | Search the library |
+| `,` | Settings |
+| `u` | The update notice, when there is one |
+| Tab / Shift+Tab | Move between the popup's controls; Space or Enter presses the one with the ring |
 | Esc | Close |
 
 ## Commands

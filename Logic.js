@@ -403,6 +403,7 @@ function preferenceDefaults() {
     equalizerShown: false,
     titleWidth: 260,       // the bar title's widest, in px; 0 is its full length
     scrollTitle: true,     // a bar title too long for its width scrolls
+    popupMotion: true,     // the popup's long lines scroll and the live dot pulses
     updateCheck: true,     // ask GitHub for a newer release once a day
     updateDismissed: "",   // the release whose notice was dismissed
     settingsMigrated: false,
@@ -688,6 +689,7 @@ function parsePreferences(text) {
   prefs.volumeStep = VOLUME_STEPS.indexOf(data.volumeStep) !== -1 ? data.volumeStep : 5
   prefs.titleWidth = TITLE_WIDTHS.indexOf(data.titleWidth) !== -1 ? data.titleWidth : 260
   prefs.scrollTitle = data.scrollTitle !== false
+  prefs.popupMotion = data.popupMotion !== false
   prefs.updateCheck = data.updateCheck !== false
   prefs.updateDismissed = parseVersion(data.updateDismissed) ? String(data.updateDismissed) : ""
   prefs.settingsMigrated = data.settingsMigrated === true
@@ -1454,6 +1456,15 @@ var PLUGIN_ID = "lancefaul.omedia-controls"
 var RELEASES_API = "https://api.github.com/repos/lancefaul/omarchy-omedia-controls/releases/latest"
 var RELEASES_PAGE = "https://github.com/lancefaul/omarchy-omedia-controls/releases/"
 var UPDATE_COMMAND = ["omarchy", "plugin", "update", PLUGIN_ID, "--yes"]
+// Said for any failed update, with the command's output kept behind Details.
+var UPDATE_FAILED = "Couldn't update. Run \u201c" + UPDATE_COMMAND.slice(0, 4).join(" ")
+  + "\u201d in a terminal to see why."
+
+// Whether a git remote URL is the public repo (https or ssh, with or without
+// .git). Anything else means this copy is a development checkout.
+function isPublicRemote(url) {
+  return /github\.com[:\/]lancefaul\/omarchy-omedia-controls(\.git)?\/?$/i.test(String(url).trim())
+}
 var UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 var RESTART_COMMAND = ["omarchy", "restart", "shell"]
 // An update reloads the plugin, which takes this widget with it, so an
@@ -2071,16 +2082,27 @@ function formatChips(info) {
 // application name against the player's identity ("mpv" and "mpv", "Brave" and
 // "Brave Origin"), then the track title in the stream's name, which tells two
 // streams from the same app apart. 0 means no match.
-function streamScore(props, identity, title) {
+function streamScore(props, identity, title, busName) {
   if (!props) return 0
   var app = firstText(props["application.name"]).toLowerCase()
   var ident = firstText(identity).toLowerCase()
-  if (!app || !ident) return 0
-  var appMatch = app === ident || ident.indexOf(app) === 0 || app.indexOf(ident) === 0
+  if (!app) return 0
+  var appMatch = !!ident && (app === ident || ident.indexOf(app) === 0 || app.indexOf(ident) === 0)
+  // A player whose identity isn't its stream's name: an app embedding a player
+  // under its own name (identity "MyApp", bus name ...archamp.myapp, stream
+  // "archamp"). The bus name's player part, before any instance suffix, says
+  // which program it is. Without it the whole output was recorded.
+  if (!appMatch) appMatch = busPlayer(busName) === app
   if (!appMatch) return 0
   var name = firstText(props["media.name"]).toLowerCase()
   var t = firstText(title).toLowerCase()
   return t && name.indexOf(t) !== -1 ? 2 : 1
+}
+
+// "org.mpris.MediaPlayer2.archamp.myapp" -> "archamp"; "" for anything else.
+function busPlayer(busName) {
+  var m = /^org\.mpris\.MediaPlayer2\.([^.]+)/.exec(String(busName || ""))
+  return m ? m[1].toLowerCase() : ""
 }
 
 // ---------------------------------------------------------------- metadata
@@ -2293,6 +2315,11 @@ function keyAction(key) {
   case "]": return "faster"
   case "l": return "goLive"
   case "escape": return "close"
+  // The popup's other parts, which had no key at all (audit #2).
+  case "e": return "equalizer"
+  case "/": return "search"
+  case ",": return "settings"
+  case "u": return "update"
   }
   return ""
 }

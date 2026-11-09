@@ -404,5 +404,98 @@ class FramesTest(unittest.TestCase):
             spectrum.parse_args(["--vu", "--all"])
 
 
+
+class Recorder(unittest.TestCase):
+    """The visualiser must never open the microphone (audit #5)."""
+
+    def started_with(self, lookup):
+        asked = []
+
+        class Proc:
+            class stdout:
+                @staticmethod
+                def fileno():
+                    return 0
+
+        real_run, real_popen, real_blocking = (spectrum.subprocess.run,
+                                               spectrum.subprocess.Popen, spectrum.os.set_blocking)
+        spectrum.subprocess.run = lookup
+        spectrum.subprocess.Popen = lambda cmd, **_: asked.append(cmd) or Proc()
+        spectrum.os.set_blocking = lambda *_: None
+        try:
+            spectrum.start_recorder()
+        finally:
+            spectrum.subprocess.run, spectrum.subprocess.Popen, spectrum.os.set_blocking = (
+                real_run, real_popen, real_blocking)
+        return asked[0]
+
+    def test_a_failed_lookup_still_names_a_monitor(self):
+        def fails(*_a, **_k):
+            raise spectrum.subprocess.TimeoutExpired("pactl", 1.0)
+        cmd = self.started_with(fails)
+        self.assertEqual(cmd[cmd.index("-d") + 1], "@DEFAULT_MONITOR@")
+
+    def test_an_empty_answer_still_names_a_monitor(self):
+        class Empty:
+            stdout = ""
+        cmd = self.started_with(lambda *_a, **_k: Empty())
+        self.assertEqual(cmd[cmd.index("-d") + 1], "@DEFAULT_MONITOR@")
+
+    def test_the_default_sink_is_used_when_known(self):
+        class Sink:
+            stdout = "alsa_output.test\n"
+        cmd = self.started_with(lambda *_a, **_k: Sink())
+        self.assertEqual(cmd[cmd.index("-d") + 1], "alsa_output.test.monitor")
+
+    def test_a_stream_capture_ends_with_its_stream(self):
+        """Without dont-reconnect, parec on a stream that ended was moved on and
+        kept running; with it, parec ends and the loop falls back on purpose."""
+        asked = []
+        real = spectrum.subprocess.Popen, spectrum.os.set_blocking
+        spectrum.subprocess.Popen = lambda cmd, **_: asked.append(cmd) or type("P", (), {"stdout": type("O", (), {"fileno": staticmethod(lambda: 0)})})()
+        spectrum.os.set_blocking = lambda *_: None
+        try:
+            spectrum.start_recorder(2, 4242)
+        finally:
+            spectrum.subprocess.Popen, spectrum.os.set_blocking = real
+        self.assertIn("--monitor-stream=4242", asked[0])
+        self.assertIn("--property=node.dont-reconnect=true", asked[0])
+
+
+class StreamVolume(unittest.TestCase):
+    """The recorded stream's own volume is undone as well as the player's."""
+
+    def test_the_stream_volume_is_undone_too(self):
+        # A player at 0.26 (gain 1/0.26) on a stream at a quarter: both undone.
+        self.assertAlmostEqual(spectrum.total_gain(1 / 0.26, 0.25), 1 / 0.26 / 0.25)
+
+    def test_a_player_whose_volume_is_its_stream_is_undone_once(self):
+        self.assertAlmostEqual(spectrum.total_gain(4.0, 0.25), 4.0)
+        self.assertAlmostEqual(spectrum.total_gain(4.0, 0.252), 4.0)
+
+    def test_a_player_whose_mixer_percentage_is_its_volume_is_undone_once(self):
+        # VLC at 0.5 sets its stream to 50 % (raw), a level of 0.125: the whole attenuation, gain 8.
+        self.assertAlmostEqual(spectrum.total_gain(2.0, 0.125), 8.0)
+
+    def test_unknown_or_full_stream_volume_leaves_the_player_gain(self):
+        self.assertEqual(spectrum.total_gain(2.0, None), 2.0)
+        self.assertEqual(spectrum.total_gain(2.0, 1.0), 2.0)
+
+    def test_clamped(self):
+        self.assertEqual(spectrum.total_gain(50.0, 0.01), spectrum.MAX_GAIN)
+        self.assertEqual(spectrum.total_gain(1.0, 0.0), spectrum.MAX_GAIN)
+
+    def test_level_read_from_pactl(self):
+        class Out:
+            stdout = b'[{"index": 7, "volume": {"front-left": {"value": 32768}, "front-right": {"value": 32768}}}, "junk"]'
+        real = spectrum.subprocess.run
+        spectrum.subprocess.run = lambda *_a, **_k: Out()
+        try:
+            self.assertAlmostEqual(spectrum.stream_level(7), 0.125)
+            self.assertIsNone(spectrum.stream_level(8))
+        finally:
+            spectrum.subprocess.run = real
+
+
 if __name__ == "__main__":
     unittest.main()

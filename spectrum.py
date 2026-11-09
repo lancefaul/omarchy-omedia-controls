@@ -62,12 +62,14 @@ Exits cleanly on SIGTERM/SIGINT/broken pipe so the QML Process that owns it can
 start and stop it on demand without leaking recorder subprocesses.
 """
 import argparse
+import json
 import math
 import os
 import select
 import signal
 import subprocess
 import sys
+import time
 
 import numpy as np
 
@@ -312,6 +314,49 @@ def format_vu(levels, peaks):
 MAX_GAIN = 100.0  # +40 dB: past this, near-silence would be blown up into noise
 
 
+STREAM_VOLUME_EVERY = 1.0  # seconds between reads of the recorded stream's volume
+
+
+def stream_level(index):
+    """The linear volume PipeWire applies to a sink input (raw/65536 cubed,
+    averaged over its channels), or None when it can't be read. The capture is
+    after it, as it is after the player's own volume: a stream turned down in
+    the mixer (or a volume WirePlumber restored for the app) drew bars that
+    barely moved, 0.25 of the level here on top of the player's 0.26."""
+    try:
+        res = subprocess.run(["pactl", "-f", "json", "list", "sink-inputs"], capture_output=True, timeout=1.0)
+        for s in json.loads(res.stdout or b"[]"):
+            if isinstance(s, dict) and s.get("index") == index:
+                raw = [c["value"] for c in (s.get("volume") or {}).values()]
+                return (sum(raw) / len(raw) / 65536) ** 3
+    except Exception:
+        pass
+    return None
+
+
+def total_gain(player_gain, level):
+    """The player's gain (the widget's, 1/its volume) with the stream's volume
+    undone too, unless the stream's volume *is* the player's: a player whose
+    volume control sets its stream's would otherwise be undone twice. Players
+    set it two ways: as the linear level (the stream's level matches the
+    player's volume), or as the mixer's percentage, which PulseAudio cubes
+    (VLC's output does, `vol *= PA_VOLUME_NORM`: release review 2026-11-08),
+    so the stream's raw fraction matches. Then the stream's level is the whole
+    attenuation and only it is undone. Two separate controls can sit close by
+    chance (a stream at 0.25 under a player at 0.26), so only a match within
+    2 % counts as one. Clamped to MAX_GAIN."""
+    if level is None or level >= 1:
+        return min(MAX_GAIN, player_gain)
+    if level <= 0:
+        return MAX_GAIN
+    if player_gain > 1:
+        if abs(level * player_gain - 1) < 0.02:  # the linear level is the player's volume
+            return min(MAX_GAIN, player_gain)
+        if abs(level ** (1 / 3) * player_gain - 1) < 0.02:  # the mixer's percentage is the player's volume
+            return min(MAX_GAIN, 1 / level)
+    return min(MAX_GAIN, player_gain / level)
+
+
 def parse_stream(line, current):
     """A "stream <index>" line from the widget: a sink input's index, or "-"
     for the whole output (None). Anything else keeps the current stream."""
@@ -364,12 +409,16 @@ def get_monitor_target():
 def start_recorder(channels=1, stream=None):
     cmd = ["parec", "--format=s16le", f"--rate={RATE}", f"--channels={channels}", "--latency-msec=20"]
     if stream is not None:
-        # One app's playback only, before it is mixed with anything else.
-        cmd += [f"--monitor-stream={int(stream)}"]
+        # One app's playback only, before it is mixed with anything else. When
+        # the stream goes, parec must end (the loop then falls back to the whole
+        # output): without dont-reconnect it was moved on and kept running.
+        cmd += [f"--monitor-stream={int(stream)}", "--property=node.dont-reconnect=true", "--property=node.dont-fallback=true"]
     else:
-        monitor = get_monitor_target()
-        if monitor:
-            cmd += ["-d", monitor]
+        # Always a monitor. parec with no -d records the default *source*,
+        # the microphone, and the lookup fails whenever pactl is slow or
+        # pipewire-pulse is restarting (audit #5). @DEFAULT_MONITOR@ is the
+        # server's own name for the default sink's monitor.
+        cmd += ["-d", get_monitor_target() or "@DEFAULT_MONITOR@"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     os.set_blocking(proc.stdout.fileno(), False)
     return proc
@@ -488,6 +537,7 @@ def main():
     stream = None
     recorder = start_recorder(channels, stream)
     gain = 1.0
+    level, level_read = None, 0.0  # the recorded stream's own volume (stream_level), and when it was read
     stdin_open = True
     stdin_buffer = b""
     os.set_blocking(sys.stdin.fileno(), False)
@@ -521,12 +571,18 @@ def main():
                 # Read every line first, then switch once.
                 if wanted != stream:
                     stream = wanted
+                    level, level_read = None, 0.0  # the new stream's volume, not the old one's (review)
                     stop_recorder()
                     recorder = start_recorder(channels, stream)
                     pending = bytearray()
                     continue
         if recorder.stdout not in ready:
             continue
+
+        if stream is None:
+            level = None
+        elif time.monotonic() - level_read >= STREAM_VOLUME_EVERY:
+            level, level_read = stream_level(stream), time.monotonic()
 
         data = recorder.stdout.read(hop_bytes * 4)
         if not data:
@@ -536,7 +592,7 @@ def main():
         # Advance one analyser frame per hop, so falloff speed tracks audio
         # time rather than how often the pipe happens to deliver.
         while len(pending) >= hop_bytes:
-            hop = np.frombuffer(bytes(pending[:hop_bytes]), dtype=np.int16).astype(np.float64) / 32768.0 * gain
+            hop = np.frombuffer(bytes(pending[:hop_bytes]), dtype=np.int16).astype(np.float64) / 32768.0 * total_gain(gain, level)
             del pending[:hop_bytes]
 
             emit(frames.step(hop))

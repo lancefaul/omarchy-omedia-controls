@@ -32,6 +32,57 @@ Item {
 
   signal moved(real value)
   signal released(real value)
+  // Tab pressed while this band has focus, so the popup keeps the focus Tab
+  // moves (its catcher never sees a key a focused band takes first).
+  signal tabbed()
+
+  // The keyboard and screen readers (audit #2, #4): Tab reaches each band,
+  // Up/Down step it, Page Up/Down by three, Home/End to the bottom/top, and 0 or
+  // Delete back to flat. A focused band keeps those keys, so they don't
+  // change the volume underneath.
+  property string accessibleName: ""
+  activeFocusOnTab: true
+  Accessible.role: Accessible.Slider
+  Accessible.name: accessibleName
+  Accessible.description: (liveValue > 0 ? "+" : "") + Math.round(liveValue) + " dB"
+  Accessible.onIncreaseAction: nudge(step)
+  Accessible.onDecreaseAction: nudge(-step)
+
+  function nudge(by) {
+    var next = Math.max(minimum, Math.min(maximum, liveValue + by))
+    liveValue = next
+    moved(next)
+    released(next)
+  }
+  function setTo(next) {
+    liveValue = next
+    moved(next)
+    released(next)
+  }
+  Keys.onPressed: function(event) {
+    if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) { tabbed(); return }
+    if (event.key === Qt.Key_Up) nudge(step)
+    else if (event.key === Qt.Key_Down) nudge(-step)
+    else if (event.key === Qt.Key_PageUp) nudge(step * 3)
+    else if (event.key === Qt.Key_PageDown) nudge(-step * 3)
+    else if (event.key === Qt.Key_Home) setTo(minimum)
+    else if (event.key === Qt.Key_End) setTo(maximum)
+    else if (event.key === Qt.Key_0 || event.key === Qt.Key_Delete) setTo(0)
+    else return
+    event.accepted = true
+  }
+
+  // The keyboard's mark, as the popup's other controls have.
+  Rectangle {
+    anchors.fill: parent
+    anchors.margins: -2
+    radius: 4
+    color: "transparent"
+    border.width: 2
+    border.color: Color.accent
+    visible: root.activeFocus
+    z: 10
+  }
 
   implicitWidth: Math.max(Style.space(18), knobSize + Style.spacing.sm)
   implicitHeight: Style.space(110)

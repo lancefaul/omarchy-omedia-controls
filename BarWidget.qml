@@ -14,12 +14,19 @@ import "Logic.js" as Logic
 BarWidget {
   id: root
   moduleName: "lancefaul.omedia-controls"
+  // The shell names nothing for screen readers (audit #4): what is playing,
+  // and that a press opens the controls.
+  Accessible.role: Accessible.Button
+  Accessible.name: root.hasMedia ? "Media: " + root.title + (root.artist ? ", " + root.artist : "")
+    : "Media controls, nothing playing"
+  Accessible.onPressAction: root.toggle()
 
   // A labelled switch for the settings column: the label and a hint on the
   // left, Omarchy's own switch on the right. Clicking the row flips it too.
   // A search box, as the library and the Add browser have: Escape clears it,
   // or with nothing typed hands the keys back to the popup.
   component SearchBox: TextField {
+    Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
     id: searchBox
     signal leave()
     placeholderText: "Search music"
@@ -32,6 +39,16 @@ BarWidget {
     }
 
     Text {
+      activeFocusOnTab: true
+      function activate() { searchBox.text = "" }
+      Keys.onReturnPressed: activate()
+      Keys.onEnterPressed: activate()
+      Keys.onSpacePressed: activate()
+      Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+      Accessible.role: Accessible.Button
+      Accessible.name: "Clear search"
+      Accessible.onPressAction: activate()
+      FocusRing {}
       id: clearSearch
       visible: searchBox.text !== ""
       anchors.right: parent.right
@@ -56,12 +73,51 @@ BarWidget {
   // wider than a row: where it falls on the grid decides whether it comes out
   // as one crisp row or two dim ones, so a panel of them looks like rules of
   // two different weights. Two is the same weight wherever it lands.
+  // The keyboard's mark: a 2px accent outline just outside whatever has focus.
+  component FocusRing: Rectangle {
+    property real gap: 2
+    anchors.fill: parent
+    anchors.margins: -gap
+    radius: (parent && parent.radius !== undefined ? parent.radius : 0) + gap
+    color: "transparent"
+    border.width: 2
+    border.color: Color.accent
+    visible: parent ? parent.activeFocus : false
+    z: 10
+  }
+
+  // Omarchy's Button with Tab and a name for screen readers: its own
+  // `focusable` defaults off, which left every button pointer-only (audit #2),
+  // and the shell sets no Accessible.* (audit #4). An icon-only button without
+  // a tooltip names itself through accessibleName.
+  component PanelButton: Button {
+    focusable: true
+    // A focused control takes Tab itself, before the catcher could see it:
+    // each one says so, or keepPointerFocus would undo the move (review).
+    Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+    property string accessibleName: ""
+    function activate() { clicked() }
+    Accessible.role: Accessible.Button
+    Accessible.name: accessibleName !== "" ? accessibleName : (text !== "" ? text : tooltipText)
+    Accessible.onPressAction: clicked()
+  }
+
   component Rule: PanelSeparator {
     height: 2
   }
 
   // A search result: the track, and its artist and album folders beneath.
   component SearchResultRow: BorderSurface {
+    activeFocusOnTab: true
+    function activate() { resultRow.chosen({ modifiers: 0, button: Qt.LeftButton }) }
+    Keys.onSpacePressed: activate()
+    Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+    Accessible.role: Accessible.Button
+    Accessible.name: [resultRow.result.title, resultRow.result.artist, resultRow.result.album].filter(function(t) { return !!t }).join(", ")
+    Accessible.onPressAction: activate()
+    Keys.onReturnPressed: resultRow.played()
+    Keys.onEnterPressed: resultRow.played()
+    FocusRing {}
     id: resultRow
     property var result: ({})
     property bool picked: false
@@ -136,6 +192,19 @@ BarWidget {
   }
 
   component SettingSwitch: Item {
+    activeFocusOnTab: true
+    function activate() { settingSwitch.toggled() }
+    Keys.onReturnPressed: activate()
+    Keys.onEnterPressed: activate()
+    Keys.onSpacePressed: activate()
+    Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+    Accessible.role: Accessible.CheckBox
+    Accessible.name: label
+    Accessible.onPressAction: activate()
+    Accessible.checkable: true
+    Accessible.checked: checked
+    Accessible.description: hint
+    FocusRing {}
     id: settingSwitch
     property string label: ""
     property string hint: ""
@@ -461,7 +530,7 @@ BarWidget {
     var best = null, bestScore = 0
     for (var i = 0; i < root.playbackStreams.length; i++) {
       var n = root.playbackStreams[i]
-      var score = Logic.streamScore(n.properties, p.identity || p.desktopEntry, p.trackTitle)
+      var score = Logic.streamScore(n.properties, p.identity || p.desktopEntry, p.trackTitle, p.dbusName)
       if (score > bestScore) { best = n; bestScore = score }
     }
     if (!best) return {}
@@ -609,6 +678,7 @@ BarWidget {
       updateCheck: root.updateCheck,
       updateDismissed: root.updateDismissed,
       scrollTitle: root.scrollTitle,
+      popupMotion: root.popupMotion,
       settingsMigrated: root.settingsMigrated,
     }))
   }
@@ -1704,6 +1774,22 @@ BarWidget {
   property bool updateRunning: false
   property string updateResult: ""
   property bool updateFailed: false
+  // The command's own output when an update fails, shown behind Details:
+  // the sentence above it is what to do, this is why (audit #6).
+  property string updateDetails: ""
+  property bool updateDetailsShown: false
+  // A real red. Omarchy's urgent colour is whatever the theme says, and in
+  // some themes it is green, so a failure read as success (audit #6).
+  readonly property color danger: {
+    var c = Color.urgent
+    var reddish = c.hsvSaturation > 0.3 && (c.hsvHue < 0.06 || c.hsvHue > 0.92)
+    return reddish ? c : "#ff6b6b"
+  }
+  // A development checkout (the plugin folder a git clone whose origin is not
+  // the public repo, usually a symlink to it): `omarchy plugin update` would
+  // fast-forward it to the private main and can `git reset --hard` on a failed
+  // validation, so the notice and the button stay away (audit #7).
+  property bool devInstall: false
   // The version an update was last started for, kept in update.json so the
   // reloaded plugin can say how it went (see Logic.updateAttemptState).
   property var updateAttempt: null
@@ -1711,8 +1797,8 @@ BarWidget {
   readonly property bool updateOpen: root.sidePanel === "update"
   readonly property bool updateAvailable: root.latestRelease !== null && root.installedVersion !== ""
     && Logic.isNewerVersion(root.latestRelease.version, root.installedVersion)
-  readonly property bool showUpdateNotice: root.updatedVersion !== ""
-    || (root.updateAvailable && root.updateDismissed !== root.latestRelease.version)
+  readonly property bool showUpdateNotice: !root.devInstall && (root.updatedVersion !== ""
+    || (root.updateAvailable && root.updateDismissed !== root.latestRelease.version))
   readonly property string updateCommandText: Logic.UPDATE_COMMAND.join(" ")
 
   function checkForUpdates() {
@@ -1755,6 +1841,11 @@ BarWidget {
   // is written down first and read back by whatever loads next.
   function runUpdate() {
     if (root.updateRunning || !root.latestRelease) return
+    if (root.devInstall) {
+      root.updateFailed = true
+      root.updateResult = "This is a development install. Update it with git, not from here."
+      return
+    }
     root.updateRunning = true
     root.updateFailed = false
     root.updateResult = ""
@@ -1772,7 +1863,7 @@ BarWidget {
       root.updateResult = "Updated to " + root.updatedVersion + "."
       root.updateFailed = false
     } else if (root.updateResult === "") {
-      root.updateResult = "The update didn't finish."
+      root.updateResult = Logic.UPDATE_FAILED
       root.updateFailed = true
     }
     root.updateAttempt = null
@@ -1817,6 +1908,18 @@ BarWidget {
     }
   }
 
+  Process {
+    id: devCheck
+    command: ["git", "-C", String(Qt.resolvedUrl(".")).replace(/^file:\/\//, ""),
+              "remote", "get-url", "origin"]
+    running: true
+    stdout: StdioCollector { id: devCheckOut }
+    // Not a git clone (code ≠ 0) is not a development install either.
+    onExited: function(code) {
+      root.devInstall = code === 0 && !Logic.isPublicRemote(String(devCheckOut.text || ""))
+    }
+  }
+
   // Omarchy's plugin update: fetch, validate (rolling back a failure), and
   // reload. A successful update reloads this widget, so only a failure
   // stays to be read.
@@ -1830,7 +1933,9 @@ BarWidget {
       root.updateRunning = false
       root.updateFailed = code !== 0
       var out = (String(updateStderr.text || "") + "\n" + String(updateStdout.text || "")).trim()
-      root.updateResult = code === 0 ? (out || "Updated.") : (out || "The update failed.")
+      root.updateResult = code === 0 ? (out || "Updated.") : Logic.UPDATE_FAILED
+      root.updateDetails = code === 0 ? "" : out
+      root.updateDetailsShown = false
       if (code !== 0) {
         root.updateAttempt = null
         root.saveUpdateCache()
@@ -2111,6 +2216,7 @@ BarWidget {
       root.updateCheck = prefs.updateCheck
       root.updateDismissed = prefs.updateDismissed
       root.scrollTitle = prefs.scrollTitle
+      root.popupMotion = prefs.popupMotion
       root.visualisation = prefs.visualisation
       root.visColour = prefs.visColour
       root.pauseOthers = prefs.pauseOthers
@@ -2140,6 +2246,10 @@ BarWidget {
   property int titleWidth: 260
   // Whether a bar title too long for that width keeps scrolling.
   property bool scrollTitle: true
+  // Whether the popup's long lines scroll and the live dot pulses. Off, they
+  // hold still: a title is cut short with its whole text read out by Orca
+  // and shown on hover (audit #3).
+  property bool popupMotion: true
   property bool settingsMigrated: false
   readonly property int maxLabelWidth: root.titleWidth > 0 ? root.titleWidth : 100000
 
@@ -2506,6 +2616,16 @@ BarWidget {
   function perform(action) {
     var p = root.activePlayer
     if (action === "close") { root.close(); return true }
+    if (action === "search") {
+      if (root.sidePanel !== "library") root.toggleSidePanel("library")
+      Qt.callLater(function() { librarySearchBox.forceActiveFocus() })
+      return true
+    }
+    if (action === "settings") { root.toggleSidePanel("settings"); return true }
+    if (action === "update") {
+      if (!root.showUpdateNotice) return false
+      root.toggleSidePanel("update"); return true
+    }
     if (!p) return false
     switch (action) {
     case "playPause":
@@ -2535,6 +2655,9 @@ BarWidget {
     case "goLive":
       if (!root.canGoLive) return false
       root.jumpToLive(); return true
+    case "equalizer":
+      if (!root.playerHasEq) return false
+      root.setSetting("eqShown", !root.eqShown); return true
     }
     return false
   }
@@ -2871,7 +2994,7 @@ BarWidget {
     var best = null, bestScore = 0
     for (var i = 0; i < root.playbackStreams.length; i++) {
       var n = root.playbackStreams[i]
-      var score = Logic.streamScore(n.properties, p.identity || p.desktopEntry, p.trackTitle)
+      var score = Logic.streamScore(n.properties, p.identity || p.desktopEntry, p.trackTitle, p.dbusName)
       if (score > bestScore) { best = n; bestScore = score }
     }
     var serial = best && best.properties ? String(best.properties["object.serial"] || "") : ""
@@ -3053,6 +3176,44 @@ BarWidget {
     return String(event.text || "").toLowerCase()
   }
 
+  // A focused control gets each key before the catcher, so a button left
+  // focused by a click would take Space (play/pause) as a second press of
+  // itself. Focus a click gave a control goes back to the catcher; only Tab
+  // (and a field being typed in) keeps it. Tabbed-to controls scroll into view.
+  property bool tabbing: false
+  function insideOf(item, ancestor) {
+    for (var at = item; at; at = at.parent) if (at === ancestor) return true
+    return false
+  }
+  function revealFocused(item) {
+    for (var at = item ? item.parent : null; at; at = at.parent) {
+      if (at.contentY === undefined || at.contentItem === undefined || !at.height) continue
+      var top = item.mapToItem(at.contentItem, 0, 0).y
+      // originY: a ListView's header sits above 0.
+      var low = at.originY !== undefined ? at.originY : 0
+      if (top < at.contentY) at.contentY = Math.max(low, top - Style.spacing.xs)
+      else if (top + item.height > at.contentY + at.height)
+        at.contentY = Math.min(Math.max(low, low + at.contentHeight - at.height),
+                               top + item.height - at.height + Style.spacing.xs)
+    }
+  }
+  function keepPointerFocus() {
+    if (!root.popupOpen) return
+    var item = keyCatcher.Window.activeFocusItem
+    var byTab = root.tabbing
+    root.tabbing = false
+    if (item === keyCatcher) return
+    if (!item || insideOf(keyCatcher, item)) {
+      // A rebuilt list took the focused row with it: back to the catcher.
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+      return
+    }
+    if (!insideOf(item, keyCatcher)) return
+    if (byTab) { revealFocused(item); return }
+    if (item.cursorPosition !== undefined) return
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
   // KeyboardPanel rather than PopupCard, as Omarchy's own panels use: a popup
   // attached to the bar only receives keys once a click has routed focus
   // through the bar, so it could never have keyboard shortcuts, and could not
@@ -3076,7 +3237,19 @@ BarWidget {
       // Ahead of the buttons inside, so Space is play/pause rather than a
       // press of whichever control last had focus.
       Keys.priority: Keys.BeforeItem
+      Connections {
+        target: keyCatcher.Window.window
+        function onActiveFocusItemChanged() { root.keepPointerFocus() }
+      }
       Keys.onPressed: function(event) {
+        // Tab is left to Qt's focus chain; noted so the focus it moves
+        // stays where Tab put it (see keepPointerFocus). This branch sees Tab
+        // only while the catcher itself has focus: a focused control takes
+        // Tab first, so each one sets `tabbing` in its own Keys.onPressed.
+        if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+          root.tabbing = true
+          return
+        }
         var action = Logic.keyAction(root.keyName(event))
         if (!action) return
         root.perform(action)
@@ -3103,7 +3276,7 @@ BarWidget {
 
         // A newer release: styled like the Settings button, with a pulsing
         // dot on its left like LIVE's. Opens the release in the side column.
-        Button {
+        PanelButton {
           id: updateNotice
           visible: root.showUpdateNotice
           width: parent.width
@@ -3116,6 +3289,7 @@ BarWidget {
           onClicked: root.toggleSidePanel("update")
 
           LiveDot {
+            animated: root.popupMotion
             anchors.left: parent.left
             anchors.leftMargin: Style.space(14)
             anchors.verticalCenter: parent.verticalCenter
@@ -3159,6 +3333,16 @@ BarWidget {
           // of that motion comes from spectrum.py, not from animation here.
           trailingControl: Component {
             Item {
+              activeFocusOnTab: true
+              function activate() { root.toggleVisualisation() }
+              Keys.onReturnPressed: activate()
+              Keys.onEnterPressed: activate()
+              Keys.onSpacePressed: activate()
+              Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+              Accessible.role: Accessible.Button
+              Accessible.name: "Change the visualisation"
+              Accessible.onPressAction: activate()
+              FocusRing {}
               id: heroVis
               implicitWidth: root.heroVisWidth
               implicitHeight: root.heroVisHeight
@@ -3472,6 +3656,18 @@ BarWidget {
             spacing: Style.space(8)
 
             Text {
+              activeFocusOnTab: true
+              function activate() { root.togglePauseOthers() }
+              Keys.onReturnPressed: activate()
+              Keys.onEnterPressed: activate()
+              Keys.onSpacePressed: activate()
+              Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: "Pause other players"
+              Accessible.onPressAction: activate()
+              Accessible.checkable: true
+              Accessible.checked: root.pauseOthers
+              FocusRing {}
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
               text: "Pause others"
@@ -3512,6 +3708,18 @@ BarWidget {
             }
 
             BorderSurface {
+              activeFocusOnTab: true
+              function activate() { root.selectPlayer(root.playerKey(sourceRow.player)) }
+              Keys.onReturnPressed: activate()
+              Keys.onEnterPressed: activate()
+              Keys.onSpacePressed: activate()
+              Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+              Accessible.role: Accessible.RadioButton
+              Accessible.name: sourceRow.sourceTitle
+              Accessible.onPressAction: activate()
+              Accessible.checkable: true
+              Accessible.checked: !!sourceRow.selected
+              FocusRing {}
               id: sourceRow
               required property var modelData
 
@@ -3556,7 +3764,7 @@ BarWidget {
                 anchors.rightMargin: sourceRow.borderRight + Style.space(14)
                 spacing: Style.space(6)
 
-                Button {
+                PanelButton {
                   id: rowPlayPause
                   anchors.verticalCenter: parent.verticalCenter
                   iconText: sourceRow.player && sourceRow.player.isPlaying ? "󰏤" : "󰐊"
@@ -3602,7 +3810,7 @@ BarWidget {
                 // Not every player implements Raise — a browser tab has no
                 // window of its own to raise — so it shows only for those
                 // that say they can.
-                Button {
+                PanelButton {
                   id: rowOpen
                   anchors.verticalCenter: parent.verticalCenter
                   visible: !!(sourceRow.player && sourceRow.player.canRaise)
@@ -3624,7 +3832,7 @@ BarWidget {
                 // Closes the player itself, for one left open by accident.
                 // Only for players that say they can quit, such as mpv; a
                 // browser tab belongs to the page and offers no such thing.
-                Button {
+                PanelButton {
                   id: rowClose
                   anchors.verticalCenter: parent.verticalCenter
                   visible: !!(sourceRow.player && sourceRow.player.canQuit)
@@ -3682,7 +3890,8 @@ BarWidget {
               text: !root.sharesPlaylist ? "No shared playlist"
                 : "Song " + (root.playlistProgress.index > 0 ? root.playlistProgress.index : "–") + "/" + root.playlistProgress.count
                   + " · " + root.formatTime(root.playlistProgress.elapsed) + " / " + root.formatTime(root.playlistProgress.total)
-              running: root.popupOpen
+              running: root.popupOpen && root.popupMotion
+              scrollOnHover: true
               // The times tick every second; keep scrolling through that.
               restartOnTextChange: false
               color: Qt.darker(root.bar.foreground, 1.4)
@@ -3698,7 +3907,7 @@ BarWidget {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(6)
 
-            Button {
+            PanelButton {
               bordered: true
               iconText: "󰒝"
               foreground: root.bar.foreground
@@ -3712,7 +3921,7 @@ BarWidget {
               onClicked: if (root.hasShuffle) root.toggleShuffle()
             }
 
-            Button {
+            PanelButton {
               bordered: true
               iconText: root.hasLoop && root.activePlayer.loopState === MprisLoopState.Track ? "󰑘" : "󰑖"
               foreground: root.bar.foreground
@@ -3727,7 +3936,7 @@ BarWidget {
               onClicked: if (root.hasLoop) root.cycleLoop()
             }
 
-            Button {
+            PanelButton {
               id: playlistButton
               bordered: true
               iconText: "󰲸"
@@ -3753,6 +3962,16 @@ BarWidget {
         // The player's window, live, when it shows video: across the popup,
         // in the album art's place. Click to bring the window forward.
         BorderSurface {
+          activeFocusOnTab: !!(root.activePlayer && root.activePlayer.canRaise)
+          function activate() { if (root.raisePlayer()) root.close() }
+          Keys.onReturnPressed: activate()
+          Keys.onEnterPressed: activate()
+          Keys.onSpacePressed: activate()
+          Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+          Accessible.role: Accessible.Button
+          Accessible.name: "Show the player\u2019s window"
+          Accessible.onPressAction: activate()
+          FocusRing {}
           visible: root.showVideo
           width: parent.width
           height: Math.round(width * root.videoAspect)
@@ -3860,6 +4079,16 @@ BarWidget {
           width: parent.width
 
           BorderSurface {
+            activeFocusOnTab: !!(root.activePlayer && root.activePlayer.canRaise)
+            function activate() { if (root.raisePlayer()) root.close() }
+            Keys.onReturnPressed: activate()
+            Keys.onEnterPressed: activate()
+            Keys.onSpacePressed: activate()
+            Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+            Accessible.role: Accessible.Button
+            Accessible.name: "Show the player\u2019s window"
+            Accessible.onPressAction: activate()
+            FocusRing {}
             visible: !root.showVideo
             width: Style.space(64)
             height: Style.space(64)
@@ -3904,7 +4133,8 @@ BarWidget {
             // Each line scrolls while the popup is open if it is too long to fit.
             Marquee {
               text: root.title || "Nothing playing"
-              running: root.popupOpen
+              running: root.popupOpen && root.popupMotion
+              scrollOnHover: true
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.subtitle
@@ -3914,7 +4144,8 @@ BarWidget {
 
             Marquee {
               text: root.artist
-              running: root.popupOpen
+              running: root.popupOpen && root.popupMotion
+              scrollOnHover: true
               color: Qt.darker(root.bar.foreground, 1.3)
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -3925,7 +4156,8 @@ BarWidget {
             // Album, then album artist, year and track number where tagged.
             Marquee {
               text: root.albumLine
-              running: root.popupOpen
+              running: root.popupOpen && root.popupMotion
+              scrollOnHover: true
               color: Qt.darker(root.bar.foreground, 1.6)
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
@@ -4042,6 +4274,7 @@ BarWidget {
               spacing: Style.space(4)
 
               LiveDot {
+                animated: root.popupMotion
                 anchors.verticalCenter: parent.verticalCenter
                 size: Style.space(6)
                 color: Color.accent
@@ -4049,6 +4282,16 @@ BarWidget {
               }
 
               Text {
+                function activate() { root.jumpToLive() }
+                Keys.onReturnPressed: activate()
+                Keys.onEnterPressed: activate()
+                Keys.onSpacePressed: activate()
+                Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+                Accessible.role: Accessible.Button
+                Accessible.name: "Go live"
+                Accessible.onPressAction: activate()
+                activeFocusOnTab: root.canGoLive
+                FocusRing {}
                 textFormat: Text.PlainText
                 text: liveArea.containsMouse && root.canGoLive ? "GO LIVE" : "LIVE"
                 color: Color.accent
@@ -4093,7 +4336,7 @@ BarWidget {
                 // asking to be dealt with. Runs only while the popup is open
                 // on a paused track, so nothing animates out of sight.
                 SequentialAnimation {
-                  running: root.popupOpen && root.hasTimeline && root.activePlayer !== null
+                  running: root.popupOpen && root.popupMotion && root.hasTimeline && root.activePlayer !== null
                     && !root.activePlayer.isPlaying && !root.seeking
                   loops: Animation.Infinite
                   alwaysRunToEnd: true
@@ -4116,7 +4359,7 @@ BarWidget {
                 anchors.top: parent.top
                 spacing: Style.spacing.md
 
-                Button {
+                PanelButton {
                   bordered: true
                   iconText: Logic.skipIcon(root.seekStep, false)
                   iconSize: Style.font.icon
@@ -4129,7 +4372,7 @@ BarWidget {
                   onClicked: root.perform("seekBack")
                 }
 
-                Button {
+                PanelButton {
                   bordered: true
                   iconText: Logic.skipIcon(root.seekStep, true)
                   iconSize: Style.font.icon
@@ -4146,6 +4389,16 @@ BarWidget {
               // Click to flip between total length and time remaining, the way
               // Winamp's counter does.
               Text {
+                activeFocusOnTab: true
+                function activate() { root.showRemaining = !root.showRemaining }
+                Keys.onReturnPressed: activate()
+                Keys.onEnterPressed: activate()
+                Keys.onSpacePressed: activate()
+                Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+                Accessible.role: Accessible.Button
+                Accessible.name: "Show " + (root.showRemaining ? "elapsed" : "remaining") + " time"
+                Accessible.onPressAction: activate()
+                FocusRing {}
                 id: rightTime
                 anchors.right: parent.right
                 anchors.verticalCenter: skipButtons.verticalCenter
@@ -4197,7 +4450,7 @@ BarWidget {
           readonly property real cellWidth: (width - spacing * 4 - playWidth) / 4
 
           // Lyrics for the playing track, in the side column.
-          Button {
+          PanelButton {
             anchors.verticalCenter: parent.verticalCenter
             width: transport.cellWidth
             bordered: true
@@ -4215,7 +4468,7 @@ BarWidget {
             onClicked: if (root.lyricsAvailable || root.lyricsOpen) root.toggleSidePanel("lyrics")
           }
 
-          Button {
+          PanelButton {
             id: transportPrevious
             anchors.verticalCenter: parent.verticalCenter
             width: transport.cellWidth
@@ -4229,7 +4482,7 @@ BarWidget {
             onClicked: root.runAction("previous", root.playerKey(root.activePlayer))
           }
 
-          Button {
+          PanelButton {
             anchors.verticalCenter: parent.verticalCenter
             width: transport.playWidth
             // Wider than the rest, but the same height as the row.
@@ -4244,7 +4497,7 @@ BarWidget {
             onClicked: root.runAction("playPause", root.playerKey(root.activePlayer))
           }
 
-          Button {
+          PanelButton {
             anchors.verticalCenter: parent.verticalCenter
             width: transport.cellWidth
             bordered: true
@@ -4258,7 +4511,7 @@ BarWidget {
           }
 
           // Winamp's eject: opens the music library in a column beside the player.
-          Button {
+          PanelButton {
             anchors.verticalCenter: parent.verticalCenter
             width: transport.cellWidth
             bordered: true
@@ -4309,7 +4562,7 @@ BarWidget {
           Repeater {
             model: Logic.SPEED_STEPS
 
-            Button {
+            PanelButton {
               required property var modelData
               width: speedRow.cellWidth
               bordered: true
@@ -4355,6 +4608,18 @@ BarWidget {
             opacity: root.hasVolume ? 1.0 : 0.4
 
             Text {
+              activeFocusOnTab: true
+              function activate() { root.toggleMute() }
+              Keys.onReturnPressed: activate()
+              Keys.onEnterPressed: activate()
+              Keys.onSpacePressed: activate()
+              Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: "Volume on"
+              Accessible.onPressAction: activate()
+              Accessible.checkable: true
+              Accessible.checked: text === "On"
+              FocusRing {}
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
               text: parent.parent.on ? "On" : "Off"
@@ -4486,6 +4751,18 @@ BarWidget {
             spacing: Style.space(8)
 
             Text {
+              activeFocusOnTab: true
+              function activate() { root.setEqEnabled(!root.eqEnabled) }
+              Keys.onReturnPressed: activate()
+              Keys.onEnterPressed: activate()
+              Keys.onSpacePressed: activate()
+              Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: "Equalizer on"
+              Accessible.onPressAction: activate()
+              Accessible.checkable: true
+              Accessible.checked: root.eqEnabled
+              FocusRing {}
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
               text: root.eqEnabled ? "On" : "Off"
@@ -4510,7 +4787,7 @@ BarWidget {
             // Whether the bands are on screen is a separate question from
             // whether the equalizer is doing anything: one left switched on is
             // not one you want taking up the window for the rest of the day.
-            Button {
+            PanelButton {
               anchors.verticalCenter: parent.verticalCenter
               bordered: true
               iconText: root.eqShown ? "󰅃" : "󰅀"
@@ -4552,7 +4829,7 @@ BarWidget {
             font.pixelSize: Style.font.bodySmall
           }
 
-          Button {
+          PanelButton {
             id: presetsButton
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
@@ -4636,6 +4913,8 @@ BarWidget {
               minimum: root.eqMinGain
               maximum: root.eqMaxGain
               value: root.eqPreamp
+              accessibleName: "Equalizer preamp"
+              onTabbed: root.tabbing = true
               onMoved: function(v) { root.eqPreamp = v }
               onReleased: function(v) { root.setEqPreamp(v) }
 
@@ -4673,6 +4952,8 @@ BarWidget {
                   root.eqPending = pending
                 }
                 onReleased: function(v) { root.setEqBand(bandSlider.index, v) }
+                accessibleName: "Equalizer " + Logic.bandLabel(root.eqFrequencies[bandSlider.index])
+                onTabbed: root.tabbing = true
 
                 Text {
                   anchors.horizontalCenter: parent.horizontalCenter
@@ -4700,7 +4981,7 @@ BarWidget {
           width: parent.width
           spacing: Style.spacing.md
 
-          Button {
+          PanelButton {
             id: eqSaveButton
             width: (parent.width - parent.spacing) / 2
             bordered: true
@@ -4716,7 +4997,7 @@ BarWidget {
             onClicked: root.saveEqualizerPreset()
           }
 
-          Button {
+          PanelButton {
             width: (parent.width - parent.spacing) / 2
             height: eqSaveButton.height
             bordered: true
@@ -4735,7 +5016,7 @@ BarWidget {
         }
 
         // Settings, in the side column: bordered, full width, icon and label.
-        Button {
+        PanelButton {
           width: parent.width
           bordered: true
           iconText: "󰒓"
@@ -4744,6 +5025,17 @@ BarWidget {
           fontFamily: root.bar.fontFamily
           selected: root.settingsOpen
           onClicked: root.toggleSidePanel("settings")
+        }
+        // The keys, said once and small: they were only in the README (audit #7).
+        Text {
+          width: parent.width
+          wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
+          text: "Space play · \u2190\u2192 seek · \u2191\u2193 volume · n p next, previous · e equalizer"
+            + " · / search · , settings · Tab moves"
+          color: Qt.darker(root.bar.foreground, 1.5)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.caption
         }
       }
 
@@ -4830,7 +5122,7 @@ BarWidget {
             }
           }
 
-          Button {
+          PanelButton {
             id: playAll
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
@@ -4930,6 +5222,16 @@ BarWidget {
           boundsBehavior: Flickable.StopAtBounds
 
           header: BorderSurface {
+            activeFocusOnTab: true
+            function activate() { root.openLibraryFolder(Logic.parentFolder(root.libraryRoot, root.libraryFolder)) }
+            Keys.onReturnPressed: activate()
+            Keys.onEnterPressed: activate()
+            Keys.onSpacePressed: activate()
+            Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+            Accessible.role: Accessible.Button
+            Accessible.name: "Up one folder"
+            Accessible.onPressAction: activate()
+            FocusRing {}
             visible: root.libraryFolder !== root.libraryRoot
             width: libraryList.width
             height: visible ? library.rowHeight : 0
@@ -4970,6 +5272,17 @@ BarWidget {
           }
 
           delegate: BorderSurface {
+            activeFocusOnTab: true
+            function activate() { if (entry.fileIsDir) root.openLibraryFolder(entry.filePath); else root.selectTrack(entry.filePath, false, library.trackPaths) }
+            Keys.onSpacePressed: activate()
+            Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+            Accessible.role: Accessible.Button
+            Accessible.name: entry.fileName + (entry.fileIsDir ? ", folder" : "")
+            Accessible.onPressAction: activate()
+            Keys.onReturnPressed: entry.fileIsDir ? root.openLibraryFolder(entry.filePath) : root.playFromLibrary(entry.filePath)
+            Keys.onEnterPressed: entry.fileIsDir ? root.openLibraryFolder(entry.filePath) : root.playFromLibrary(entry.filePath)
+            Accessible.selected: !!entry.picked
+            FocusRing {}
             id: entry
             required property string fileName
             required property string filePath
@@ -5028,7 +5341,7 @@ BarWidget {
               }
 
               // Plays the whole folder; mpv takes a folder as a playlist.
-              Button {
+              PanelButton {
                 id: folderPlay
                 anchors.verticalCenter: parent.verticalCenter
                 visible: entry.fileIsDir
@@ -5097,7 +5410,7 @@ BarWidget {
           anchors.bottom: parent.bottom
           spacing: Style.spacing.md
 
-          Button {
+          PanelButton {
             id: playSelected
             width: (parent.width - parent.spacing) * 0.68
             bordered: true
@@ -5109,7 +5422,7 @@ BarWidget {
           }
 
           // An icon like Play's, so the two buttons are the same height.
-          Button {
+          PanelButton {
             width: (parent.width - parent.spacing) * 0.32
             height: playSelected.height
             bordered: true
@@ -5194,6 +5507,7 @@ BarWidget {
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
                 onChosen: root.callEqualizer("ApplyPreset", "s", [modelData])
+                onPlayed: root.callEqualizer("ApplyPreset", "s", [modelData])
               }
             }
           }
@@ -5359,7 +5673,8 @@ BarWidget {
             text: !root.hasTrackList ? "This player doesn't share its playlist"
               : root.playlistProgress.count + (root.playlistProgress.count === 1 ? " song · " : " songs · ")
                 + root.formatTime(root.playlistProgress.total) + (root.playlistEdited ? " · edited" : "")
-            running: root.popupOpen && root.playlistOpen
+            running: root.popupOpen && root.playlistOpen && root.popupMotion
+            scrollOnHover: true
             restartOnTextChange: false
             color: Qt.darker(root.bar.foreground, 1.4)
             font.family: root.bar.fontFamily
@@ -5368,7 +5683,7 @@ BarWidget {
         }
 
         // Saved playlists, opened in this column, and a new one.
-        Button {
+        PanelButton {
           id: openSaved
           anchors.right: newSaved.left
           anchors.rightMargin: Style.spacing.md
@@ -5384,7 +5699,7 @@ BarWidget {
           onClicked: root.showPlaylists()
         }
 
-        Button {
+        PanelButton {
           id: newSaved
           anchors.right: parent.right
           anchors.verticalCenter: playlistTitle.verticalCenter
@@ -5514,7 +5829,7 @@ BarWidget {
                 width: visible ? implicitWidth : 0
                 spacing: Style.space(4)
 
-                Button {
+                PanelButton {
                   visible: root.canMoveTracks
                   bordered: true
                   iconText: "󰁝"
@@ -5527,7 +5842,7 @@ BarWidget {
                   onClicked: if (track.index > 0) root.moveQueueTrack(track.index, -1)
                 }
 
-                Button {
+                PanelButton {
                   visible: root.canMoveTracks
                   bordered: true
                   iconText: "󰁅"
@@ -5540,7 +5855,7 @@ BarWidget {
                   onClicked: if (track.index < root.playlistIds.length - 1) root.moveQueueTrack(track.index, 1)
                 }
 
-                Button {
+                PanelButton {
                   visible: root.canEditTracks
                   bordered: true
                   iconText: "󰅖"
@@ -5669,6 +5984,16 @@ BarWidget {
           }
 
           header: BorderSurface {
+            activeFocusOnTab: true
+            function activate() { root.queueAddFolder = Logic.parentFolder(root.libraryRoot, root.queueAddFolder) }
+            Keys.onReturnPressed: activate()
+            Keys.onEnterPressed: activate()
+            Keys.onSpacePressed: activate()
+            Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+            Accessible.role: Accessible.Button
+            Accessible.name: "Up one folder"
+            Accessible.onPressAction: activate()
+            FocusRing {}
             visible: root.queueAddFolder !== root.libraryRoot
             width: queueAddList.width
             height: visible ? Style.space(30) : 0
@@ -5709,6 +6034,20 @@ BarWidget {
           }
 
           delegate: BorderSurface {
+            activeFocusOnTab: true
+            function activate() {
+              if (addEntry.fileIsDir) { root.queueAddFolder = Logic.libraryFolder(root.libraryRoot, addEntry.filePath); return }
+              root.queueAddSelection = Logic.toggleSelection(root.queueAddSelection, addEntry.filePath)
+              root.queueAddAnchor = Logic.cleanPath(addEntry.filePath)
+            }
+            Keys.onReturnPressed: activate()
+            Keys.onEnterPressed: activate()
+            Keys.onSpacePressed: activate()
+            Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+            Accessible.role: Accessible.Button
+            Accessible.name: addEntry.fileName + (addEntry.fileIsDir ? ", folder" : "")
+            Accessible.onPressAction: activate()
+            FocusRing {}
             id: addEntry
             required property string fileName
             required property string filePath
@@ -5795,7 +6134,7 @@ BarWidget {
           readonly property int buttons: root.linkActive ? 3 : 2
           readonly property real third: (width - spacing * (buttons - 1)) / buttons
 
-          Button {
+          PanelButton {
             id: queueAddButton
             visible: !root.queueAdding
             width: queueBar.third
@@ -5813,7 +6152,7 @@ BarWidget {
             onClicked: if (root.canEditTracks) root.startQueueAdd()
           }
 
-          Button {
+          PanelButton {
             visible: !root.queueAdding
             width: queueBar.third
             height: queueAddButton.height
@@ -5834,7 +6173,7 @@ BarWidget {
             }
           }
 
-          Button {
+          PanelButton {
             visible: !root.queueAdding && root.linkActive
             width: queueBar.third
             height: queueAddButton.height
@@ -5848,7 +6187,7 @@ BarWidget {
             onClicked: if (root.queuePaths.length > 0) root.startNewPlaylist(root.queuePaths, "playlist")
           }
 
-          Button {
+          PanelButton {
             id: queueAddConfirm
             visible: root.queueAdding
             width: (queueBar.width - queueBar.spacing) * 0.68
@@ -5861,7 +6200,7 @@ BarWidget {
             onClicked: if (root.queueAddSelection.length > 0) root.finishQueueAdd(true)
           }
 
-          Button {
+          PanelButton {
             visible: root.queueAdding
             width: (queueBar.width - queueBar.spacing) * 0.32
             height: queueAddConfirm.height
@@ -6043,7 +6382,7 @@ BarWidget {
               font.pixelSize: Style.font.caption
             }
 
-            Button {
+            PanelButton {
               id: copyCommand
               anchors.right: parent.right
               anchors.rightMargin: Style.space(6)
@@ -6067,7 +6406,30 @@ BarWidget {
             wrapMode: Text.Wrap
             maximumLineCount: 6
             elide: Text.ElideRight
-            color: root.updateFailed ? Color.urgent : Qt.darker(root.bar.foreground, 1.2)
+            color: root.updateFailed ? root.danger : Qt.darker(root.bar.foreground, 1.2)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            Accessible.role: root.updateFailed ? Accessible.AlertMessage : Accessible.StaticText
+            Accessible.name: text
+          }
+
+          // Why it failed, in the command's own words, only when asked.
+          PanelButton {
+            visible: root.updateFailed && root.updateDetails !== ""
+            iconText: root.updateDetailsShown ? "󰅀" : "󰅂"
+            text: root.updateDetailsShown ? "Hide details" : "Details"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            onClicked: root.updateDetailsShown = !root.updateDetailsShown
+          }
+
+          Text {
+            width: parent.width
+            visible: root.updateDetailsShown && root.updateFailed && root.updateDetails !== ""
+            textFormat: Text.PlainText
+            text: root.updateDetails
+            wrapMode: Text.Wrap
+            color: Qt.darker(root.bar.foreground, 1.2)
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
           }
@@ -6076,7 +6438,7 @@ BarWidget {
             width: parent.width
             spacing: Style.spacing.md
 
-            Button {
+            PanelButton {
               id: runUpdateButton
               width: (parent.width - parent.spacing) * 0.68
               bordered: true
@@ -6089,7 +6451,7 @@ BarWidget {
               onClicked: root.updatedVersion !== "" ? root.restartShell() : root.runUpdate()
             }
 
-            Button {
+            PanelButton {
               width: (parent.width - parent.spacing) * 0.32
               height: runUpdateButton.height
               bordered: true
@@ -6157,7 +6519,7 @@ BarWidget {
           }
 
           // Play the open playlist, or start a new one.
-          Button {
+          PanelButton {
             id: playlistsAction
             visible: !playlistsPanel.naming
             anchors.right: parent.right
@@ -6193,6 +6555,16 @@ BarWidget {
         // Back: to the player's playlist from the list, to the list from a
         // saved playlist.
         component BackRow: BorderSurface {
+          activeFocusOnTab: true
+          function activate() { back.activated() }
+          Keys.onReturnPressed: activate()
+          Keys.onEnterPressed: activate()
+          Keys.onSpacePressed: activate()
+          Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+          Accessible.role: Accessible.Button
+          Accessible.name: label
+          Accessible.onPressAction: activate()
+          FocusRing {}
           id: back
           property string label: ""
           signal activated()
@@ -6256,6 +6628,16 @@ BarWidget {
           }
 
           delegate: BorderSurface {
+            activeFocusOnTab: true
+            function activate() { root.openSavedPlaylist(saved.filePath) }
+            Keys.onReturnPressed: activate()
+            Keys.onEnterPressed: activate()
+            Keys.onSpacePressed: activate()
+            Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+            Accessible.role: Accessible.Button
+            Accessible.name: saved.fileName
+            Accessible.onPressAction: activate()
+            FocusRing {}
             id: saved
             required property string fileName
             required property string filePath
@@ -6303,7 +6685,7 @@ BarWidget {
                 font.pixelSize: Style.font.bodySmall
               }
 
-              Button {
+              PanelButton {
                 id: savedPlay
                 anchors.verticalCenter: parent.verticalCenter
                 bordered: true
@@ -6421,7 +6803,7 @@ BarWidget {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Style.space(4)
 
-                Button {
+                PanelButton {
                   bordered: true
                   iconText: "󰁝"
                   iconSize: Style.font.caption
@@ -6433,7 +6815,7 @@ BarWidget {
                   onClicked: if (entryRow.index > 0) root.editSavedEntry("move", entryRow.index, -1)
                 }
 
-                Button {
+                PanelButton {
                   bordered: true
                   iconText: "󰁅"
                   iconSize: Style.font.caption
@@ -6445,7 +6827,7 @@ BarWidget {
                   onClicked: if (entryRow.index < root.playlistEntries.length - 1) root.editSavedEntry("move", entryRow.index, 1)
                 }
 
-                Button {
+                PanelButton {
                   bordered: true
                   iconText: "󰅖"
                   iconSize: Style.font.caption
@@ -6484,7 +6866,7 @@ BarWidget {
           anchors.bottom: parent.bottom
           spacing: Style.spacing.md
 
-          Button {
+          PanelButton {
             id: renamePlaylist
             width: (parent.width - parent.spacing) / 2
             bordered: true
@@ -6495,7 +6877,7 @@ BarWidget {
             onClicked: root.startRenamePlaylist()
           }
 
-          Button {
+          PanelButton {
             width: (parent.width - parent.spacing) / 2
             height: renamePlaylist.height
             bordered: true
@@ -6545,6 +6927,7 @@ BarWidget {
 
           TextField {
             id: playlistNameField
+            Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
             width: parent.width
             placeholderText: "Playlist name"
             foreground: root.bar.foreground
@@ -6571,7 +6954,7 @@ BarWidget {
             width: parent.width
             spacing: Style.spacing.md
 
-            Button {
+            PanelButton {
               id: namerSave
               width: (parent.width - parent.spacing) * 0.68
               bordered: true
@@ -6582,7 +6965,7 @@ BarWidget {
               onClicked: root.commitPlaylistName(playlistNameField.text)
             }
 
-            Button {
+            PanelButton {
               width: (parent.width - parent.spacing) * 0.32
               height: namerSave.height
               bordered: true
@@ -6710,7 +7093,7 @@ BarWidget {
               width: parent.width
               spacing: Style.spacing.md
 
-              Button {
+              PanelButton {
                 width: (parent.width - parent.spacing) / 2
                 // From the button beside it, whose label never changes, so
                 // "Checking…" can't resize the row.
@@ -6724,7 +7107,7 @@ BarWidget {
                 onClicked: root.checkForUpdates()
               }
 
-              Button {
+              PanelButton {
                 id: viewUpdateButton
                 width: (parent.width - parent.spacing) / 2
                 bordered: true
@@ -6765,7 +7148,7 @@ BarWidget {
               Repeater {
                 model: Logic.VIS_COLOURS
 
-                Button {
+                PanelButton {
                   required property string modelData
                   width: (visColourRow.width - visColourRow.spacing * (Logic.VIS_COLOURS.length - 1)) / Logic.VIS_COLOURS.length
                   bordered: true
@@ -6791,6 +7174,18 @@ BarWidget {
                 // A tile per visualisation: a still of it, drawn the way the
                 // header draws it on a frame of made-up music, and its name.
                 BorderSurface {
+                  activeFocusOnTab: true
+                  function activate() { root.setSetting("visualisation", visTile.modelData) }
+                  Keys.onReturnPressed: activate()
+                  Keys.onEnterPressed: activate()
+                  Keys.onSpacePressed: activate()
+                  Keys.onPressed: function(event) { if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) root.tabbing = true }
+                  Accessible.role: Accessible.RadioButton
+                  Accessible.name: visTile.modelData
+                  Accessible.onPressAction: activate()
+                  Accessible.checkable: true
+                  Accessible.checked: root.visualisation === visTile.modelData
+                  FocusRing {}
                   id: visTile
                   required property string modelData
                   readonly property bool picked: root.visualisation === modelData
@@ -6939,7 +7334,7 @@ BarWidget {
               width: parent.width
               spacing: Style.spacing.md
 
-              Button {
+              PanelButton {
                 width: (parent.width - parent.spacing) / 2
                 bordered: true
                 iconText: "󱍙"
@@ -6949,7 +7344,7 @@ BarWidget {
                 onClicked: root.chooseMusicFolder()
               }
 
-              Button {
+              PanelButton {
                 width: (parent.width - parent.spacing) / 2
                 bordered: true
                 iconText: "󰦛"
@@ -6989,7 +7384,7 @@ BarWidget {
               width: parent.width
               spacing: Style.spacing.md
 
-              Button {
+              PanelButton {
                 width: (parent.width - parent.spacing) / 2
                 bordered: true
                 iconText: "󱍙"
@@ -6999,7 +7394,7 @@ BarWidget {
                 onClicked: root.choosePlaylistFolder()
               }
 
-              Button {
+              PanelButton {
                 width: (parent.width - parent.spacing) / 2
                 bordered: true
                 iconText: "󰦛"
@@ -7041,7 +7436,7 @@ BarWidget {
               width: parent.width
               spacing: Style.space(4)
 
-              Button {
+              PanelButton {
                 width: parent.width
                 bordered: true
                 text: {
@@ -7057,7 +7452,7 @@ BarWidget {
               Repeater {
                 model: root.audioApps
 
-                Button {
+                PanelButton {
                   id: appButton
                   required property string modelData
                   width: parent.width
@@ -7084,7 +7479,7 @@ BarWidget {
             // Choosing a player above only tells this plugin what to use.
             // Whether it opens audio files for the whole desktop is the
             // desktop's own setting, and this is the offer to change it.
-            Button {
+            PanelButton {
               width: parent.width
               visible: Logic.canBeDesktopDefault(root.musicPlayer, root.desktopAudioApp)
               bordered: true
@@ -7161,7 +7556,7 @@ BarWidget {
               width: parent.width
               spacing: Style.spacing.md
 
-              Button {
+              PanelButton {
                 width: (parent.width - parent.spacing) / 2
                 bordered: true
                 text: "Forget stations"
@@ -7173,7 +7568,7 @@ BarWidget {
                 onClicked: root.forgetStations()
               }
 
-              Button {
+              PanelButton {
                 width: (parent.width - parent.spacing) / 2
                 bordered: true
                 text: "Clear lyrics"
@@ -7229,7 +7624,7 @@ BarWidget {
               Repeater {
                 model: Logic.TITLE_WIDTHS
 
-                Button {
+                PanelButton {
                   required property int modelData
                   width: (titleWidths.width - titleWidths.spacing * (Logic.TITLE_WIDTHS.length - 1)) / Logic.TITLE_WIDTHS.length
                   bordered: true
@@ -7243,8 +7638,20 @@ BarWidget {
               }
             }
 
-            // Only the bar's title; the popup's long lines always scroll.
-            // Nothing to scroll at full width, so it's dimmed there.
+            // The popup's own lines and its live dot, which used to move
+            // with no way to stop them (audit #3).
+            SettingSwitch {
+              label: "Moving text in the popup"
+              hint: root.popupMotion ? "Long titles scroll and the live dot pulses. Off holds them still."
+                : "Long titles are cut short and the live dot is steady. Hover a title to read it."
+              checked: root.popupMotion
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              onToggled: root.setSetting("popupMotion", !root.popupMotion)
+            }
+
+            // Only the bar's title. Nothing to scroll at full width, so it's
+            // dimmed there.
             SettingSwitch {
               label: "Scroll the bar title"
               hint: root.titleWidth > 0 ? "A title longer than its width keeps moving. Off cuts it short."
@@ -7281,7 +7688,7 @@ BarWidget {
               Repeater {
                 model: Logic.SEEK_STEPS
 
-                Button {
+                PanelButton {
                   required property int modelData
                   width: (seekSteps.width - seekSteps.spacing * (Logic.SEEK_STEPS.length - 1)) / Logic.SEEK_STEPS.length
                   bordered: true
@@ -7310,7 +7717,7 @@ BarWidget {
               Repeater {
                 model: Logic.VOLUME_STEPS
 
-                Button {
+                PanelButton {
                   required property int modelData
                   width: (volumeSteps.width - volumeSteps.spacing * 2) / 3
                   bordered: true
